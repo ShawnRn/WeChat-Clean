@@ -1,0 +1,24 @@
+# 任务清单
+
+- [x] 1. 调研与架构设计
+  - [x] 分析用户会话列表中 `.dat` 未解密且缩略图为占位图的根因
+  - [x] 确定高精度 `xor_key` 校验法与 Apple Silicon 全核并行 UIN 求解器
+  - [x] 撰写 implementation_plan.md
+- [x] 2. 核心解密引擎全面升级 (`WeChatDatDecoder.swift`)
+  - [x] 接入 `all_keys.json` 与 `UserDefaults` 中的直接图片密钥加载管线 (0ms)
+  - [x] 实现针对 `*_t.dat` 的两字节 JPEG EOI 文件尾严格校验确定真实 `xor_key`
+  - [x] 实现 `DispatchQueue.concurrentPerform` 全核心并行极速 UIN 求解器 (无堆分配 + 现代 CryptoKit)
+  - [x] 增加 V1 格式固定密钥与传统 XOR 兼容
+  - [x] 实现 `detectRealTypeCached` 零阻塞内存缓存，杜绝主线程 I/O
+- [x] 3. 内存密钥提取工具拓展 (`scripts/extract_keys.py`)
+  - [x] 增加进程内存 V2 图片 AES-128 密钥扫描与验证
+  - [x] 将提取的 `image_aes_key` 与 `image_xor_key` 写入 `all_keys.json`
+- [x] 4. UI 真实媒体格式呈现与明文交互 (`FileListView.swift`)
+  - [x] 标题列将解密成功的文件智能展示为明文真实名（如 `xxx.jpg`），副标题保留 `已解密 · msg/attach/...`
+  - [x] 分类列显示高亮 `JPEG 图像` / `PNG 图像` 真实类型
+  - [x] 确保 `MediaThumbnailView` 高清渲染真实照片缩略图
+  - [x] 底部操作胶囊与右键菜单提供“解密导出”功能
+- [x] 5. 编译、打包与实机测试
+  - [x] `swift build` 编译验证零报错、零警告
+  - [x] `swift test` 测试套件 100% 通过
+  - [x] 打包运行并实机验证会话附件解密与满帧滚动体验

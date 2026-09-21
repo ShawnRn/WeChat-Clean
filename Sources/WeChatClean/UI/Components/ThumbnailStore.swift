@@ -10,24 +10,21 @@ import Observation
 public final class ThumbnailStore {
     public static let shared = ThumbnailStore()
 
-    // 内存硬引用字典（驱动 SwiftUI 视图响应式重绘）
+    // 内存硬引用字典（LRU 辅助，防止全局频繁触发全量重绘）
+    @ObservationIgnored
     public private(set) var thumbnails: [URL: NSImage] = [:]
 
     // 快速 NSCache（LRU 淘汰，避免大列表内存膨胀）
     @ObservationIgnored
     private let lruCache = NSCache<NSURL, NSImage>()
 
-    // 正在进行的并发请求集合，防止同一个 URL 触发重复解码
+    // 正在进行的并发 Task 字典，防止同一个 URL 触发重复解码
     @ObservationIgnored
-    private var activeRequests = Set<URL>()
-
-    // 回调列表：当后台解码完成时，通知所有等待该 URL 的 View 更新其 @State
-    @ObservationIgnored
-    private var callbacks: [URL: [(@MainActor (NSImage) -> Void)]] = [:]
+    private var inFlightTasks: [URL: Task<NSImage?, Never>] = [:]
 
     private init() {
-        lruCache.countLimit = 800
-        lruCache.totalCostLimit = 60 * 1024 * 1024 // 60MB 内存上限
+        lruCache.countLimit = 1000
+        lruCache.totalCostLimit = 80 * 1024 * 1024 // 80MB 内存上限
     }
 
     /// 同步获取缓存中的缩略图（若无则返回 nil）
@@ -38,46 +35,46 @@ public final class ThumbnailStore {
         return thumbnails[url]
     }
 
-    /// 异步请求缩略图并支持完成回调（精准驱动具体单元格的 @State 更新）
-    public func requestThumbnail(
-        for item: WeChatFileItem,
-        size: CGFloat = 32,
-        completion: (@MainActor @escaping (NSImage) -> Void)
-    ) {
+    /// 现代 Swift 异步加载缩略图（支持并发请求合并去重，零闭包丢失风险）
+    public func loadThumbnail(for item: WeChatFileItem, size: CGFloat = 32) async -> NSImage? {
         let url = item.url
-
-        // 1. 若已有缓存，直接同步返回
-        if let cached = cachedImage(for: url) {
-            completion(cached)
-            return
+        func logStore(_ msg: String) {
+            let line = "\(Date()): [loadThumbnail] \(item.name): \(msg)\n"
+            if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/wechat_thumb.log")) {
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: Data(line.utf8))
+                try? handle.close()
+            }
         }
 
-        // 2. 检查是否为可生成缩略图的媒体类型
+        if let cached = cachedImage(for: url) {
+            logStore("CACHE HIT")
+            return cached
+        }
+
         let ext = url.pathExtension.lowercased()
         let isImage = ["jpg", "jpeg", "png", "heic", "webp", "gif", "bmp", "tiff"].contains(ext)
         let isVideo = ["mp4", "mov", "m4v", "avi", "mkv"].contains(ext)
         let isDat = (ext == "dat")
 
+        logStore("CALLED: ext=\(ext), isImage=\(isImage), isDat=\(isDat)")
+
         guard isImage || isVideo || isDat || item.thumbnailURL != nil else {
-            return
+            logStore("GUARD REJECTED!")
+            return nil
         }
 
-        // 3. 注册回调
-        callbacks[url, default: []].append(completion)
-
-        // 4. 避免对同一 URL 重复启动后台任务
-        guard !activeRequests.contains(url) else {
-            return
+        // 若已有正在进行的后台任务，直接复用其计算结果
+        if let existing = inFlightTasks[url] {
+            return await existing.value
         }
-        activeRequests.insert(url)
 
-        let maxPixelSize = size * 2.0 // 支持 Retina 屏幕高清缩放
+        let maxPixelSize = size * 2.0 // 支持 Retina 屏幕
         let targetURL = item.url
         let thumbHintURL = item.thumbnailURL
 
-        // 5. 后台并发异步解码
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let decodedImage = await Self.decodeMedia(
+        let task = Task.detached(priority: .userInitiated) { () -> NSImage? in
+            return await Self.decodeMedia(
                 targetURL: targetURL,
                 thumbHintURL: thumbHintURL,
                 isDat: isDat,
@@ -86,42 +83,30 @@ public final class ThumbnailStore {
                 maxPixelSize: maxPixelSize,
                 renderSize: size
             )
-
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.activeRequests.remove(url)
-
-                if let image = decodedImage {
-                    let cost = Int(image.size.width * image.size.height * 4)
-                    self.lruCache.setObject(image, forKey: url as NSURL, cost: cost)
-
-                    // 字典容量保护，防止长时间使用造成无限增长
-                    if self.thumbnails.count > 500 {
-                        self.thumbnails.removeAll(keepingCapacity: true)
-                    }
-                    self.thumbnails[url] = image
-                    QuickLookManager.shared.setImage(image, for: url)
-
-                    // 触发所有等待该 URL 的回调
-                    if let cbs = self.callbacks.removeValue(forKey: url) {
-                        for cb in cbs {
-                            cb(image)
-                        }
-                    }
-                } else {
-                    self.callbacks.removeValue(forKey: url)
-                }
-            }
         }
+
+        inFlightTasks[url] = task
+        let result = await task.value
+        inFlightTasks.removeValue(forKey: url)
+
+        if let image = result {
+            let cost = Int(image.size.width * image.size.height * 4)
+            lruCache.setObject(image, forKey: url as NSURL, cost: cost)
+
+            // 容量保护
+            if thumbnails.count > 500 {
+                thumbnails.removeAll(keepingCapacity: true)
+            }
+            thumbnails[url] = image
+            QuickLookManager.shared.setImage(image, for: url)
+        }
+
+        return result
     }
 
-    /// 兼容旧版同步调用（返回当前缓存或启动后台加载）
+    /// 兼容旧版同步调用（返回当前缓存）
     public func thumbnail(for item: WeChatFileItem, size: CGFloat = 32) -> NSImage? {
-        if let cached = cachedImage(for: item.url) {
-            return cached
-        }
-        requestThumbnail(for: item, size: size) { _ in }
-        return nil
+        return cachedImage(for: item.url)
     }
 
     /// 后台无阻塞解码流水线

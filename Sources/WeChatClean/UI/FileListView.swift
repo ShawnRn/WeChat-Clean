@@ -2,9 +2,12 @@ import SwiftUI
 import QuickLook
 import Quartz
 
+/// 文件列表视图（顶上一体化沉浸式毛玻璃 Header，内容穿透磨砂模糊，支持原生多选、排序、QuickLook 与分页）
 public struct FileListView: View {
     @Bindable var state: AppState
     @State private var keyMonitor: Any?
+    @State private var hoveredItemID: String? = nil
+    @State private var lastClickedIndex: Int? = nil
 
     public init(state: AppState) {
         self.state = state
@@ -17,27 +20,25 @@ public struct FileListView: View {
 
     public var body: some View {
         ZStack(alignment: .bottom) {
-            VStack(spacing: 0) {
-                // 1. 顶部 Header (类似 MotrixMac TaskListHeader，带呼吸感)
-                headerView
-                    .padding(.horizontal, 22)
-                    .padding(.top, 24)
-                    .padding(.bottom, 12)
-
-                Divider()
-                    .padding(.horizontal, 22)
-
-                // 2. 列表内容
-                if state.scanProgress.isScanning && state.displayedItems.isEmpty {
-                    loadingView
-                } else if state.displayedItems.isEmpty {
-                    emptyView
-                } else {
-                    tableViewContent
-                }
+            // 1. 列表核心内容与顶上一体化毛玻璃 Header (利用 safeAreaInset 实现全尺寸穿透滚动与整块磨砂模糊)
+            if state.scanProgress.isScanning && state.displayedItems.isEmpty {
+                loadingView
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        unifiedHeaderView
+                    }
+            } else if state.displayedItems.isEmpty {
+                emptyView
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        unifiedHeaderView
+                    }
+            } else {
+                scrollableContentList
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        unifiedHeaderView
+                    }
             }
 
-            // 3. 底部悬浮操作条 (Floating Action Bar)
+            // 2. 底部悬浮操作条 (Floating Action Bar, 对齐 Pearcleaner 胶囊风格)
             if !state.selectedItemIDs.isEmpty {
                 floatingActionBar
                     .padding(.bottom, 20)
@@ -47,9 +48,17 @@ public struct FileListView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             setupKeyMonitor()
+            QuickLookManager.shared.onNavigateNext = {
+                state.selectNextItem()
+            }
+            QuickLookManager.shared.onNavigatePrevious = {
+                state.selectPreviousItem()
+            }
         }
         .onDisappear {
             removeKeyMonitor()
+            QuickLookManager.shared.onNavigateNext = nil
+            QuickLookManager.shared.onNavigatePrevious = nil
         }
         .onChange(of: state.selectedItemIDs) { _, newIDs in
             state.selectedTotalSize = newIDs.compactMap { state.itemMap[$0]?.size }.reduce(0, +)
@@ -66,60 +75,28 @@ public struct FileListView: View {
         }
     }
 
-    // MARK: - 键盘快捷键监听 (⌘+A 全选, ⌘+Delete 移入废纸篓, 空格预览, ESC 取消选择)
-    private func setupKeyMonitor() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // 如果焦点在文本框输入（如搜索框、修改备注框），不拦截快捷键
-            if let firstResponder = NSApp.keyWindow?.firstResponder,
-               firstResponder is NSTextView || firstResponder is NSTextField {
-                return event
-            }
+    // MARK: - 顶上一体化沉浸式毛玻璃 Header (整块超细磨砂模糊，彻底消除断层)
+    private var unifiedHeaderView: some View {
+        VStack(spacing: 0) {
+            // 1. 顶部 Header 标题与工具栏
+            headerTopBar
+                .padding(.horizontal, 22)
+                .padding(.top, 20)
+                .padding(.bottom, 10)
 
-            let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+            // 2. 表头列名行 (支持点击列名切换正序/倒序，指示箭头随动)
+            tableHeaderRow
+                .padding(.horizontal, 22)
+                .padding(.vertical, 7)
 
-            // 1. ⌘ + A 全选当前列表 (keyCode 0 或字符 'a')
-            if flags == .command && (event.charactersIgnoringModifiers?.lowercased() == "a" || event.keyCode == 0) {
-                state.selectAllFiltered()
-                return nil
-            }
-
-            // 2. ⌘ + Backspace (或 Delete) 移入废纸篓 (keyCode 51 为 delete, 117 为 forward delete)
-            if flags == .command && (event.keyCode == 51 || event.keyCode == 117) {
-                if !state.selectedItemIDs.isEmpty {
-                    state.cleanSelected(preserveThumbnails: true)
-                    return nil
-                }
-            }
-
-            // 3. keyCode 49 为空格键 (QuickLook 预览)
-            if event.keyCode == 49 {
-                if let url = firstSelectedURL {
-                    QuickLookManager.shared.togglePreview(for: url)
-                    return nil
-                }
-            }
-
-            // 4. ESC 键清除选择 (keyCode 53)
-            if event.keyCode == 53 {
-                if !state.selectedItemIDs.isEmpty {
-                    state.clearSelection()
-                    return nil
-                }
-            }
-
-            return event
+            // 3. 底部分隔线 (精细边框)
+            Divider()
         }
+        .background(.ultraThinMaterial)
     }
 
-    private func removeKeyMonitor() {
-        if let monitor = keyMonitor {
-            NSEvent.removeMonitor(monitor)
-            keyMonitor = nil
-        }
-    }
-
-    // MARK: - 顶部 Header (MotrixMac 风格)
-    private var headerView: some View {
+    // MARK: - 顶部 Header 工具栏
+    private var headerTopBar: some View {
         HStack(alignment: .center, spacing: 14) {
             if state.drillDownSession != nil {
                 Button {
@@ -237,99 +214,332 @@ public struct FileListView: View {
         }
     }
 
-    // MARK: - 表格内容 (支持点击表头原生排序)
-    private var tableViewContent: some View {
-        VStack(spacing: 0) {
-            Table(state.displayedItems, selection: $state.selectedItemIDs, sortOrder: $state.tableSortOrder) {
-                // 1. 文件名列（可点击表头按名称排序）
-                TableColumn("文件名", value: \.name) { item in
-                    HStack(spacing: 10) {
-                        MediaThumbnailView(item: item, size: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(item.name)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+    // MARK: - 表头列名行 (点击表头排序)
+    private var tableHeaderRow: some View {
+        HStack(spacing: 12) {
+            // 1. 文件名表头 (对齐下方缩略图与文字)
+            Button {
+                toggleSortName()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("文件名")
+                        .font(.system(size: 11, weight: .semibold))
+                    let sortInfo = currentSortIndicator(for: \WeChatFileItem.name)
+                    if sortInfo.isActive {
+                        Image(systemName: sortInfo.isAscending ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                }
+                .foregroundStyle(isCurrentSort(for: \WeChatFileItem.name) ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 38) // 避让每行左侧复选框与缩略图对齐
 
-                                if item.isHardlink {
-                                    Image(systemName: "link")
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(.purple)
-                                        .help("APFS 硬链接副本")
-                                }
-                            }
+            // 2. 大小表头
+            Button {
+                toggleSortSize()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("大小")
+                        .font(.system(size: 11, weight: .semibold))
+                    let sortInfo = currentSortIndicator(for: \WeChatFileItem.size)
+                    if sortInfo.isActive {
+                        Image(systemName: sortInfo.isAscending ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                }
+                .foregroundStyle(isCurrentSort(for: \WeChatFileItem.size) ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .frame(width: 90, alignment: .trailing)
 
-                            HStack(spacing: 4) {
-                                if let hash = item.sessionHash {
-                                    Text(state.sessionDisplayName(for: hash))
-                                        .font(.system(size: 10, weight: .medium))
-                                        .foregroundStyle(Color.accentColor.opacity(0.8))
-                                    Text("·")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.tertiary)
-                                }
-                                Text(relativeDisplayPath(for: item.url))
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
+            // 3. 分类表头
+            Button {
+                toggleSortCategory()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("分类")
+                        .font(.system(size: 11, weight: .semibold))
+                    let sortInfo = currentSortIndicator(for: \WeChatFileItem.category.rawValue)
+                    if sortInfo.isActive {
+                        Image(systemName: sortInfo.isAscending ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                }
+                .foregroundStyle(isCurrentSort(for: \WeChatFileItem.category.rawValue) ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .frame(width: 80, alignment: .leading)
+            .padding(.leading, 12)
+
+            // 4. 修改时间表头
+            Button {
+                toggleSortDate()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("修改时间")
+                        .font(.system(size: 11, weight: .semibold))
+                    let sortInfo = currentSortIndicator(for: \WeChatFileItem.modificationDate)
+                    if sortInfo.isActive {
+                        Image(systemName: sortInfo.isAscending ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                }
+                .foregroundStyle(isCurrentSort(for: \WeChatFileItem.modificationDate) ? Color.accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .frame(width: 125, alignment: .trailing)
+            .padding(.trailing, 10)
+        }
+    }
+
+    // MARK: - 可穿透滚动的列表内容 (内容平滑滑入整块毛玻璃 Header 下方)
+    private var scrollableContentList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 1) {
+                    ForEach(Array(state.displayedItems.enumerated()), id: \.element.id) { index, item in
+                        fileRowView(item: item, index: index)
+                            .id(item.id)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 6)
+                .padding(.bottom, 70) // 避让底部悬浮胶囊
+
+                // 底部加载更多控制器
+                if state.filteredItemCount > state.displayedItems.count {
+                    HStack(spacing: 8) {
+                        Text("已显示前 \(state.displayedItems.count) 项，共 \(state.filteredItemCount) 项 (\(ByteCountFormatter.string(fromByteCount: state.currentCategorySize, countStyle: .file)))")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+
+                        Button("加载更多 500 项") {
+                            state.displayLimit += 500
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+
+                        Button("加载全部") {
+                            state.displayLimit = max(state.filteredItemCount, 1000)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                    .padding(.vertical, 14)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .onChange(of: state.selectedItemIDs) { _, newIDs in
+                if let firstID = newIDs.first {
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        proxy.scrollTo(firstID, anchor: nil)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - 单行文件单元格 (与表头严格像素级对齐，智能识别真实格式)
+    private func fileRowView(item: WeChatFileItem, index: Int) -> some View {
+        let isSelected = state.selectedItemIDs.contains(item.id)
+        let isHovered = (hoveredItemID == item.id)
+        let realType = (item.url.pathExtension.lowercased() == "dat") ? WeChatDatDecoder.shared.detectRealTypeCached(at: item.url) : .unknown
+
+        // 若已解密出真实格式，主名称以明文格式显示 (如 xxx.jpg / xxx.png)
+        let displayName: String = {
+            if realType != .unknown && item.name.lowercased().hasSuffix(".dat") {
+                let base = (item.name as NSString).deletingPathExtension
+                return "\(base).\(realType.fileExtension)"
+            }
+            return item.name
+        }()
+
+        return HStack(spacing: 12) {
+            // 1. 选择勾选钮与缩略图及名称
+            HStack(spacing: 10) {
+                Button {
+                    toggleSelection(for: item, index: index)
+                } label: {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 13))
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.3))
+                }
+                .buttonStyle(.plain)
+
+                MediaThumbnailView(item: item, size: 28)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(displayName)
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if realType != .unknown {
+                            Text(realType.rawValue)
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(Color.accentColor)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                        }
+
+                        if item.isHardlink {
+                            Image(systemName: "link")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.purple)
+                                .help("APFS 硬链接副本")
                         }
                     }
-                    .contextMenu {
-                        contextMenu(for: item)
+
+                    HStack(spacing: 4) {
+                        if let hash = item.sessionHash {
+                            Text(state.sessionDisplayName(for: hash))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.accentColor.opacity(0.85))
+                            Text("·")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                        if realType != .unknown && item.name.lowercased().hasSuffix(".dat") {
+                            Text("已解密")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color.green.opacity(0.85))
+                            Text("·")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text(relativeDisplayPath(for: item.url))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
-                .width(min: 240, ideal: 360)
-
-                // 2. 大小列（可点击表头按大小升序/降序）
-                TableColumn("大小", value: \.size) { item in
-                    Text(item.formattedSize)
-                        .font(.system(size: 12, weight: item.size >= 100 * 1024 * 1024 ? .semibold : .regular).monospacedDigit())
-                        .foregroundStyle(item.size >= 100 * 1024 * 1024 ? Color.primary : Color.secondary)
-                }
-                .width(min: 80, ideal: 90, max: 110)
-
-                // 3. 分类列（可点击表头按分类排序）
-                TableColumn("分类", value: \.category.rawValue) { item in
-                    Text(item.category.rawValue)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .width(min: 65, ideal: 75, max: 90)
-
-                // 4. 修改时间列（可点击表头按时间升序/降序）
-                TableColumn("修改时间", value: \.modificationDate) { item in
-                    Text(item.formattedDate)
-                        .font(.system(size: 11).monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-                .width(min: 110, ideal: 125, max: 140)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            if state.filteredItemCount > state.displayedItems.count {
-                HStack(spacing: 8) {
-                    Text("已显示前 \(state.displayedItems.count) 项，共 \(state.filteredItemCount) 项 (\(ByteCountFormatter.string(fromByteCount: state.currentCategorySize, countStyle: .file)))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+            // 2. 大小
+            Text(item.formattedSize)
+                .font(.system(size: 12, weight: item.size >= 100 * 1024 * 1024 ? .semibold : .regular).monospacedDigit())
+                .foregroundStyle(item.size >= 100 * 1024 * 1024 ? Color.primary : Color.secondary)
+                .frame(width: 90, alignment: .trailing)
 
-                    Button("加载更多 500 项") {
-                        state.displayLimit += 500
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
+            // 3. 分类 (若为解密媒体则显示明确类型如 JPEG 图像)
+            Text(realType != .unknown ? realType.localizedDescription : item.category.rawValue)
+                .font(.system(size: 11))
+                .foregroundStyle(realType != .unknown ? Color.accentColor : .secondary)
+                .frame(width: 80, alignment: .leading)
+                .padding(.leading, 12)
 
-                    Button("加载全部") {
-                        state.displayLimit = max(state.filteredItemCount, 1000)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                }
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity)
-                .background(Color(nsColor: .windowBackgroundColor))
+            // 4. 修改时间
+            Text(item.formattedDate)
+                .font(.system(size: 11).monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 125, alignment: .trailing)
+                .padding(.trailing, 10)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(0.12) : (isHovered ? Color.primary.opacity(0.04) : Color.clear))
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                hoveredItemID = item.id
+            } else if hoveredItemID == item.id {
+                hoveredItemID = nil
             }
+        }
+        .onTapGesture(count: 2) {
+            // 双击快速调用空格预览
+            QuickLookManager.shared.togglePreview(for: item.url)
+        }
+        .onTapGesture {
+            handleRowClick(item: item, index: index)
+        }
+        .contextMenu {
+            contextMenu(for: item)
+        }
+    }
+
+    // MARK: - 点击选择逻辑 (支持 Shift 连续多选与 ⌘ 多选)
+    private func handleRowClick(item: WeChatFileItem, index: Int) {
+        let flags = NSEvent.modifierFlags
+        if flags.contains(.command) {
+            toggleSelection(for: item, index: index)
+        } else if flags.contains(.shift), let last = lastClickedIndex {
+            let start = min(last, index)
+            let end = max(last, index)
+            let rangeItems = state.displayedItems[start...end]
+            for it in rangeItems {
+                state.selectedItemIDs.insert(it.id)
+            }
+        } else {
+            state.selectedItemIDs = [item.id]
+            lastClickedIndex = index
+        }
+    }
+
+    private func toggleSelection(for item: WeChatFileItem, index: Int) {
+        if state.selectedItemIDs.contains(item.id) {
+            state.selectedItemIDs.remove(item.id)
+        } else {
+            state.selectedItemIDs.insert(item.id)
+        }
+        lastClickedIndex = index
+    }
+
+    // MARK: - 排序状态辅助 (符合 Swift 6 严格并发模型)
+    private func isCurrentSort(for keyPath: PartialKeyPath<WeChatFileItem>) -> Bool {
+        guard let first = state.tableSortOrder.first else { return false }
+        return first.keyPath == keyPath
+    }
+
+    private func currentSortIndicator(for keyPath: PartialKeyPath<WeChatFileItem>) -> (isActive: Bool, isAscending: Bool) {
+        guard let first = state.tableSortOrder.first, first.keyPath == keyPath else {
+            return (false, false)
+        }
+        return (true, first.order == .forward)
+    }
+
+    private func toggleSortName() {
+        if let first = state.tableSortOrder.first, first.keyPath == \WeChatFileItem.name {
+            let newOrder: SortOrder = (first.order == .forward) ? .reverse : .forward
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.name, order: newOrder)]
+        } else {
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.name, order: .forward)]
+        }
+    }
+
+    private func toggleSortSize() {
+        if let first = state.tableSortOrder.first, first.keyPath == \WeChatFileItem.size {
+            let newOrder: SortOrder = (first.order == .forward) ? .reverse : .forward
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.size, order: newOrder)]
+        } else {
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.size, order: .reverse)]
+        }
+    }
+
+    private func toggleSortCategory() {
+        if let first = state.tableSortOrder.first, first.keyPath == \WeChatFileItem.category.rawValue {
+            let newOrder: SortOrder = (first.order == .forward) ? .reverse : .forward
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.category.rawValue, order: newOrder)]
+        } else {
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.category.rawValue, order: .forward)]
+        }
+    }
+
+    private func toggleSortDate() {
+        if let first = state.tableSortOrder.first, first.keyPath == \WeChatFileItem.modificationDate {
+            let newOrder: SortOrder = (first.order == .forward) ? .reverse : .forward
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.modificationDate, order: newOrder)]
+        } else {
+            state.tableSortOrder = [KeyPathComparator(\WeChatFileItem.modificationDate, order: .reverse)]
         }
     }
 
@@ -350,7 +560,6 @@ public struct FileListView: View {
 
             Divider().frame(height: 12)
 
-            // 如果当前只选择了当前页面的项目，且总项目数更多，提供一键全选全部项目按钮
             if !isAllSelected && state.filteredItemCount > state.displayedItems.count {
                 Button {
                     state.selectAllCategory()
@@ -374,6 +583,23 @@ public struct FileListView: View {
             .buttonStyle(.plain)
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(.secondary)
+
+            // 解密导出按钮 (当选中项包含 .dat 时提供一键解密为明文图片)
+            Button {
+                let selected = state.selectedItemIDs.compactMap { state.itemMap[$0] }
+                exportDecryptedItems(selected)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "square.and.arrow.up")
+                    Text("解密导出")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
 
             Button(role: .destructive) {
                 state.cleanSelected(preserveThumbnails: true)
@@ -404,6 +630,40 @@ public struct FileListView: View {
         .padding(.horizontal, 28)
     }
 
+    // MARK: - 解密并批量导出为明文文件
+    private func exportDecryptedItems(_ items: [WeChatFileItem]) {
+        let panel = NSOpenPanel()
+        panel.title = "选择解密导出目标文件夹"
+        panel.prompt = "导出到此目录"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK, let targetDir = panel.url else { return }
+
+        Task.detached(priority: .userInitiated) {
+            var successCount = 0
+            for item in items {
+                if item.url.pathExtension.lowercased() == "dat" {
+                    if (try? WeChatDatDecoder.shared.exportDecryptedFile(from: item.url, to: targetDir)) != nil {
+                        successCount += 1
+                    }
+                } else {
+                    let dest = targetDir.appendingPathComponent(item.name)
+                    try? FileManager.default.copyItem(at: item.url, to: dest)
+                    successCount += 1
+                }
+            }
+
+            await MainActor.run {
+                state.showAlert = true
+                state.alertMessage = "成功解密并导出 \(successCount) 项文件到：\(targetDir.lastPathComponent)"
+                NSWorkspace.shared.activateFileViewerSelecting([targetDir])
+            }
+        }
+    }
+
     private func relativeDisplayPath(for url: URL) -> String {
         let path = url.path
         if let range = path.range(of: "xwechat_files/") {
@@ -417,22 +677,72 @@ public struct FileListView: View {
         return url.deletingLastPathComponent().lastPathComponent
     }
 
-    // MARK: - 辅助组件
-    @ViewBuilder
-    private func fileIcon(for item: WeChatFileItem) -> some View {
-        Image(systemName: iconName(for: item.category))
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
-            .frame(width: 16)
+    // MARK: - 键盘快捷键监听
+    private func setupKeyMonitor() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if let firstResponder = NSApp.keyWindow?.firstResponder,
+               firstResponder is NSTextView || firstResponder is NSTextField {
+                return event
+            }
+
+            let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+
+            // 1. ⌘ + A 全选当前列表
+            if flags == .command && (event.charactersIgnoringModifiers?.lowercased() == "a" || event.keyCode == 0) {
+                state.selectAllFiltered()
+                return nil
+            }
+
+            // 2. ⌘ + Backspace (或 Delete) 移入废纸篓
+            if flags == .command && (event.keyCode == 51 || event.keyCode == 117) {
+                if !state.selectedItemIDs.isEmpty {
+                    state.cleanSelected(preserveThumbnails: true)
+                    return nil
+                }
+            }
+
+            // 3. 空格键 (QuickLook 预览)
+            if event.keyCode == 49 {
+                if let url = firstSelectedURL {
+                    QuickLookManager.shared.togglePreview(for: url)
+                    return nil
+                }
+            }
+
+            // 4. ESC 键清除选择
+            if event.keyCode == 53 {
+                if !state.selectedItemIDs.isEmpty {
+                    state.clearSelection()
+                    return nil
+                }
+            }
+
+            // 5. 方向键导航 (↑ 上一项, ↓ 下一项, ⌘↑ 首项, ⌘↓ 末项)
+            if event.keyCode == 126 { // Up arrow
+                if flags.contains(.command) {
+                    state.selectFirstItem()
+                } else {
+                    state.selectPreviousItem()
+                }
+                return nil
+            }
+            if event.keyCode == 125 { // Down arrow
+                if flags.contains(.command) {
+                    state.selectLastItem()
+                } else {
+                    state.selectNextItem()
+                }
+                return nil
+            }
+
+            return event
+        }
     }
 
-    private func iconName(for category: WeChatCategory) -> String {
-        switch category {
-        case .video: return "film"
-        case .file: return "doc"
-        case .attach: return "photo"
-        case .cache: return "archivebox"
-        default: return "doc"
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
         }
     }
 
@@ -444,6 +754,14 @@ public struct FileListView: View {
         Button("在 Finder 中显示") {
             NSWorkspace.shared.activateFileViewerSelecting([item.url])
         }
+
+        if item.url.pathExtension.lowercased() == "dat" {
+            Divider()
+            Button("解密并另存为明文图片...") {
+                exportDecryptedItems([item])
+            }
+        }
+
         Divider()
         Button("移入废纸篓", role: .destructive) {
             state.selectedItemIDs = [item.id]

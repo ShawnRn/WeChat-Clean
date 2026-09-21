@@ -229,15 +229,14 @@ public struct SidebarView: View {
                 .buttonStyle(.bordered)
             } else {
                 HStack(spacing: 10) {
-                    // 头像
-                    ZStack {
-                        Circle()
-                            .fill(Color.accentColor.opacity(0.12))
-                            .frame(width: 34, height: 34)
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 15))
-                            .foregroundStyle(Color.accentColor)
-                    }
+                    // 微信个人真实头像
+                    ContactAvatarView(
+                        avatarURL: state.selectedAccount?.avatarURL,
+                        displayName: state.selectedAccount?.displayTitle ?? "",
+                        identifier: state.selectedAccount?.id,
+                        size: 34,
+                        isCircle: true
+                    )
 
                     // 昵称与微信号
                     VStack(alignment: .leading, spacing: 2) {

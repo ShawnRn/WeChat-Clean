@@ -160,12 +160,18 @@ public final class AppState {
         if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
             self.selectedAccount?.customWeChatID = wechatId
         }
+        if let avatar = loadRes.myAvatarURL, !avatar.isEmpty {
+            self.selectedAccount?.avatarURL = avatar
+        }
         if let idx = accounts.firstIndex(where: { $0.id == account.id }) {
             if let nick = loadRes.myNickname, !nick.isEmpty {
                 self.accounts[idx].customNickname = nick
             }
             if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
                 self.accounts[idx].customWeChatID = wechatId
+            }
+            if let avatar = loadRes.myAvatarURL, !avatar.isEmpty {
+                self.accounts[idx].avatarURL = avatar
             }
         }
 
@@ -230,12 +236,18 @@ public final class AppState {
         if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
             self.selectedAccount?.customWeChatID = wechatId
         }
+        if let avatar = loadRes.myAvatarURL, !avatar.isEmpty {
+            self.selectedAccount?.avatarURL = avatar
+        }
         if let idx = accounts.firstIndex(where: { $0.id == account.id }) {
             if let nick = loadRes.myNickname, !nick.isEmpty {
                 self.accounts[idx].customNickname = nick
             }
             if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
                 self.accounts[idx].customWeChatID = wechatId
+            }
+            if let avatar = loadRes.myAvatarURL, !avatar.isEmpty {
+                self.accounts[idx].avatarURL = avatar
             }
         }
 
@@ -470,6 +482,47 @@ public final class AppState {
     /// O(1) 字典查找分类大小
     public func categorySize(_ category: WeChatCategory) -> Int64 {
         categorySizes[category] ?? 0
+    }
+
+    // MARK: - 键盘方向键列表导航
+
+    public func selectPreviousItem() {
+        guard !displayedItems.isEmpty else { return }
+        if let currentID = selectedItemIDs.first,
+           let currentIndex = displayedItems.firstIndex(where: { $0.id == currentID }) {
+            let prevIndex = max(0, currentIndex - 1)
+            let prevItem = displayedItems[prevIndex]
+            self.selectedItemIDs = [prevItem.id]
+        } else {
+            self.selectedItemIDs = [displayedItems[0].id]
+        }
+    }
+
+    public func selectNextItem() {
+        guard !displayedItems.isEmpty else { return }
+        if let currentID = selectedItemIDs.first,
+           let currentIndex = displayedItems.firstIndex(where: { $0.id == currentID }) {
+            let nextIndex = min(displayedItems.count - 1, currentIndex + 1)
+            let nextItem = displayedItems[nextIndex]
+            self.selectedItemIDs = [nextItem.id]
+
+            // 如果即将到达当前显示末端且还有未显示项，自动平滑预加载更多项
+            if nextIndex >= displayedItems.count - 10 && filteredItemCount > displayedItems.count {
+                self.displayLimit += 300
+            }
+        } else {
+            self.selectedItemIDs = [displayedItems[0].id]
+        }
+    }
+
+    public func selectFirstItem() {
+        guard let first = displayedItems.first else { return }
+        self.selectedItemIDs = [first.id]
+    }
+
+    public func selectLastItem() {
+        guard let last = displayedItems.last else { return }
+        self.selectedItemIDs = [last.id]
     }
 
     // MARK: - 账号资料与会话管理方法

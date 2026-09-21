@@ -12,6 +12,54 @@ public struct DuplicateListView: View {
     }
 
     public var body: some View {
+        Group {
+            if state.isDeduplicating {
+                VStack(spacing: 14) {
+                    ProgressView()
+                        .controlSize(.regular)
+                    Text("正在进行两阶段哈希比对与 Inode 查重...")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    unifiedHeaderBanner
+                }
+            } else if state.duplicateGroups.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.green)
+                    Text("未发现重复文件")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("当前微信数据中没有跨群重复转发的大文件，已处于最佳存储状态。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    unifiedHeaderBanner
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(state.duplicateGroups) { group in
+                            duplicateGroupCard(group)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    unifiedHeaderBanner
+                }
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var unifiedHeaderBanner: some View {
         VStack(spacing: 0) {
             // 顶部横幅
             HStack(spacing: 16) {
@@ -51,46 +99,13 @@ public struct DuplicateListView: View {
             }
             .padding(18)
             .background(RoundedRectangle(cornerRadius: 12).fill(.purple.opacity(0.06)))
-            .padding(20)
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
 
             Divider()
-                .padding(.horizontal, 20)
-
-            // 重复文件组列表
-            if state.isDeduplicating {
-                VStack(spacing: 14) {
-                    ProgressView()
-                        .controlSize(.regular)
-                    Text("正在进行两阶段哈希比对与 Inode 查重...")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if state.duplicateGroups.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.green)
-                    Text("未发现重复文件")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text("当前微信数据中没有跨群重复转发的大文件，已处于最佳存储状态。")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(state.duplicateGroups) { group in
-                            duplicateGroupCard(group)
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-                }
-            }
         }
+        .background(.ultraThinMaterial)
     }
 
     private func duplicateGroupCard(_ group: DuplicateGroup) -> some View {

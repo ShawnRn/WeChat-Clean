@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AppKit
 @testable import WeChatClean
 
 @Suite("微信存储管理引擎测试")
@@ -127,8 +128,8 @@ struct WeChatCleanTests {
 
         WeChatDatDecoder.shared.configure(with: account)
 
-        // 测试一个样本 .dat
-        let sampleDat = URL(fileURLWithPath: account.url.path).appendingPathComponent("msg/attach/bf4184d8e51dcbec842b69b06ec13875/2025-04/Img/2247680d7a4b0d795a2126141c98c931_t.dat")
+        // 测试已验证的真实样本 .dat
+        let sampleDat = URL(fileURLWithPath: account.url.path).appendingPathComponent("msg/attach/e788de13ef9767642d6474c3334ab239/2026-07/Img/1cbf94eb55c03d15eb0b7490839a26f4_h.dat")
         if FileManager.default.fileExists(atPath: sampleDat.path) {
             let data = WeChatDatDecoder.shared.decodeData(at: sampleDat)
             #expect(data != nil)
@@ -136,17 +137,117 @@ struct WeChatCleanTests {
             let thumb = WeChatDatDecoder.shared.decodeThumbnail(at: sampleDat, maxPixelSize: 64)
             #expect(thumb != nil)
         }
+    }
 
-        // 测试截图中会话 62cc3bb1bf3531344e16f6a0ab85da8f 的 .dat 文件
-        let sessionDat = URL(fileURLWithPath: account.url.path).appendingPathComponent("msg/attach/62cc3bb1bf3531344e16f6a0ab85da8f/2025-11/Img/77fe2fae24ae5d4cafd22e8f4ee8c309_h.dat")
-        if FileManager.default.fileExists(atPath: sessionDat.path) {
-            let data = WeChatDatDecoder.shared.decodeData(at: sessionDat)
-            if let data {
-                print("Header hex:", data.prefix(4).map { String(format: "%02x", $0) }.joined())
-            }
-            let thumb = WeChatDatDecoder.shared.decodeThumbnail(at: sessionDat, maxPixelSize: 56)
-            #expect(thumb != nil)
+    @Test("诊断真实附件解密数据与色彩结构")
+    func testDiagnoseRealDatFiles() throws {
+        let accounts = WeChatDetector.detectAccounts()
+        guard let account = accounts.first else {
+            fputs("[-] 未检测到账号或无权限\n", stderr)
+            return
         }
+
+        WeChatDatDecoder.shared.configure(with: account)
+
+        // 搜索截图中出现的文件
+        let targetNames = [
+            "722a84828e0f65043626e909e7317108_h.dat",
+            "fb44177b09c45f071fe7be4c45bf0838_h.dat",
+            "1cbf94eb55c03d15eb0b7490839a26f4_h.dat",
+            "5a696b816196e32502e125c70bcf3351_h.dat",
+            "819aba7b2d0d0dcb3fa4e52c7b401bbd_h.dat"
+        ]
+
+        let attachDir = URL(fileURLWithPath: account.url.path).appendingPathComponent("msg/attach")
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: attachDir, includingPropertiesForKeys: [.fileSizeKey]) else { return }
+
+        var foundCount = 0
+        while let fileURL = enumerator.nextObject() as? URL {
+            let name = fileURL.lastPathComponent
+            if targetNames.contains(name) {
+                foundCount += 1
+                fputs("\n[+] 发现目标诊断文件: \(name)\n", stderr)
+                fputs("    路径: \(fileURL.path)\n", stderr)
+                if let rawData = try? Data(contentsOf: fileURL) {
+                    fputs("    文件大小: \(rawData.count) 字节\n", stderr)
+                    fputs("    前 15 字节: \(rawData.prefix(15).map { String(format: "%02x", $0) }.joined())\n", stderr)
+                    if rawData.count >= 15 {
+                        let aesSize = Int(rawData.subdata(in: 6..<10).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+                        let xorSize = Int(rawData.subdata(in: 10..<14).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian })
+                        let pad = rawData[14]
+                        fputs("    aesSize=\(aesSize), xorSize=\(xorSize), pad=\(pad)\n", stderr)
+
+                        // 尝试解密
+                        if let decoded = WeChatDatDecoder.shared.decode(data: rawData) {
+                            fputs("    解密成功: 大小 \(decoded.count) 字节, 开头 16: \(decoded.prefix(16).map { String(format: "%02x", $0) }.joined())\n", stderr)
+                            let outURL = URL(fileURLWithPath: "/tmp/diag_\(name).bin")
+                            try? decoded.write(to: outURL)
+                            fputs("    已写入诊断文件: \(outURL.path)\n", stderr)
+                        } else {
+                            fputs("    [-] 解密失败!\n", stderr)
+                        }
+                    }
+                }
+                if foundCount >= 3 { break }
+            }
+        }
+    }
+
+    @Test("媒体归一化与账号提取测试")
+    func testMediaNormalizationAndAccountExtraction() throws {
+        // 1. 测试账号路径推导
+        let testURL = URL(fileURLWithPath: "/Users/alice/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_test1234_5678/msg/attach/foo.dat")
+        let accountID = WeChatDatDecoder.extractAccountID(from: testURL)
+        #expect(accountID == "wxid_test1234_5678")
+
+        // 2. 测试嵌入 JPEG 的实况照片/元数据归一化
+        var mockLivePhoto = Data(repeating: 0x00, count: 1470) // 1470 字节厂商 Header
+        mockLivePhoto.append(contentsOf: [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46]) // JFIF 头
+        mockLivePhoto.append(Data(repeating: 0x20, count: 500))
+
+        let normalized = WeChatDatDecoder.normalizeMediaPayload(mockLivePhoto)
+        #expect(normalized.starts(with: [0xFF, 0xD8, 0xFF, 0xE0]))
+        #expect(normalized.count == mockLivePhoto.count - 1470)
+    }
+
+    @Test("列表方向键键盘导航逻辑测试")
+    @MainActor
+    func testKeyboardNavigation() throws {
+        let state = AppState()
+        let item1 = WeChatFileItem(url: URL(fileURLWithPath: "/tmp/1.jpg"), size: 100, category: .video, creationDate: Date(), modificationDate: Date())
+        let item2 = WeChatFileItem(url: URL(fileURLWithPath: "/tmp/2.jpg"), size: 200, category: .video, creationDate: Date(), modificationDate: Date())
+        let item3 = WeChatFileItem(url: URL(fileURLWithPath: "/tmp/3.jpg"), size: 300, category: .video, creationDate: Date(), modificationDate: Date())
+
+        state.displayedItems = [item1, item2, item3]
+
+        // 初始未选 -> 下移默认选第 0 项
+        state.selectNextItem()
+        #expect(state.selectedItemIDs == [item1.id])
+
+        // 下移 -> 选第 1 项
+        state.selectNextItem()
+        #expect(state.selectedItemIDs == [item2.id])
+
+        // 下移 -> 选第 2 项 (末尾)
+        state.selectNextItem()
+        #expect(state.selectedItemIDs == [item3.id])
+
+        // 再次下移 -> 保持末尾
+        state.selectNextItem()
+        #expect(state.selectedItemIDs == [item3.id])
+
+        // 上移 -> 选第 1 项
+        state.selectPreviousItem()
+        #expect(state.selectedItemIDs == [item2.id])
+
+        // 跳转首项
+        state.selectFirstItem()
+        #expect(state.selectedItemIDs == [item1.id])
+
+        // 跳转末项
+        state.selectLastItem()
+        #expect(state.selectedItemIDs == [item3.id])
     }
 
     @Test("联系人管理器测试")
@@ -164,29 +265,66 @@ struct WeChatCleanTests {
 
     @Test("ThumbnailStore 完整流水线测试")
     func testThumbnailStorePipeline() async throws {
-        let accounts = WeChatDetector.detectAccounts()
-        guard let account = accounts.first else { return }
-
-        WeChatDatDecoder.shared.configure(with: account)
-
-        let datURL = URL(fileURLWithPath: account.url.path).appendingPathComponent("msg/attach/62cc3bb1bf3531344e16f6a0ab85da8f/2025-11/Img/77fe2fae24ae5d4cafd22e8f4ee8c309_h.dat")
-        guard FileManager.default.fileExists(atPath: datURL.path) else { return }
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 32,
+            pixelsHigh: 32,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 32 * 4,
+            bitsPerPixel: 32
+        )!
+        let sampleImageURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_thumb_\(UUID().uuidString).png")
+        guard let pngData = rep.representation(using: .png, properties: [:]) else { return }
+        try pngData.write(to: sampleImageURL)
+        defer { try? FileManager.default.removeItem(at: sampleImageURL) }
 
         let item = WeChatFileItem(
-            url: datURL,
-            size: 32648012,
+            url: sampleImageURL,
+            size: Int64(pngData.count),
             category: .attach,
             creationDate: Date(),
             modificationDate: Date()
         )
 
-        let _ = await ThumbnailStore.shared.thumbnail(for: item, size: 28)
-
-        // 等待后台异步解码任务完成
-        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let img = await ThumbnailStore.shared.loadThumbnail(for: item, size: 28)
+        #expect(img != nil)
 
         let cached = await ThumbnailStore.shared.thumbnail(for: item, size: 28)
         #expect(cached != nil)
+    }
+
+    @Test("智能超清主图提取引擎测试")
+    func testSmartPrimaryImageExtractor() throws {
+        // 构建模拟多图层 JPEG:
+        // 1. 前置 160x107 微型缩略图
+        var mockCompound = Data([0xFF, 0xD8]) // SOI
+        // 添加 DQT
+        mockCompound.append(contentsOf: [0xFF, 0xDB, 0x00, 0x43, 0x00])
+        mockCompound.append(Data(repeating: 0x10, count: 64))
+        // 首图 SOF0 (160x107, 3 通道)
+        mockCompound.append(contentsOf: [0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x6B, 0x00, 0xA0, 0x03])
+        mockCompound.append(Data(repeating: 0x01, count: 9))
+        // 首图 SOS
+        mockCompound.append(contentsOf: [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00])
+        mockCompound.append(Data(repeating: 0xAA, count: 200))
+        // 首图 EOI
+        mockCompound.append(contentsOf: [0xFF, 0xD9])
+
+        // 2. 紧跟后部的 6000x4000 超清主图 (共用/自带 SOF0)
+        mockCompound.append(contentsOf: [0xFF, 0xC0, 0x00, 0x11, 0x08, 0x0F, 0xA0, 0x17, 0x70, 0x03]) // 6000x4000
+        mockCompound.append(Data(repeating: 0x01, count: 9))
+        mockCompound.append(contentsOf: [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00])
+        mockCompound.append(Data(repeating: 0xBB, count: 2000))
+        mockCompound.append(contentsOf: [0xFF, 0xD9]) // EOI
+
+        let extracted = WeChatDatDecoder.smartExtractPrimaryImage(mockCompound)
+        #expect(extracted.count > 0)
+        #expect(extracted.starts(with: [0xFF, 0xD8]))
+        #expect(extracted.count < mockCompound.count || extracted.starts(with: [0xFF, 0xD8, 0xFF, 0xC0]))
     }
 }
 

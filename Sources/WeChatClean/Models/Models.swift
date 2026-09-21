@@ -127,6 +127,7 @@ public struct WeChatAccount: Identifiable, Sendable, Hashable {
     public let displayName: String
     public var customNickname: String?
     public var customWeChatID: String?
+    public var avatarURL: String?
     public var totalSize: Int64 = 0
 
     public init(
@@ -135,6 +136,7 @@ public struct WeChatAccount: Identifiable, Sendable, Hashable {
         displayName: String,
         customNickname: String? = nil,
         customWeChatID: String? = nil,
+        avatarURL: String? = nil,
         totalSize: Int64 = 0
     ) {
         self.id = id
@@ -142,6 +144,7 @@ public struct WeChatAccount: Identifiable, Sendable, Hashable {
         self.displayName = displayName
         self.customNickname = customNickname
         self.customWeChatID = customWeChatID
+        self.avatarURL = avatarURL
         self.totalSize = totalSize
     }
 

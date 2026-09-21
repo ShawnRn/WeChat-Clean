@@ -56,56 +56,25 @@ public struct SessionListView: View {
 
     public var body: some View {
         ZStack(alignment: .bottom) {
-            VStack(spacing: 0) {
-                // 1. 顶部 Header
-                headerView
-                    .padding(.horizontal, 22)
-                    .padding(.top, 24)
-                    .padding(.bottom, 12)
-
-                Divider()
-                    .padding(.horizontal, 22)
-
-                // 1.1 密钥引导横幅 (未配置密钥时显著提示)
-                if !WeChatContactManager.shared.hasKey {
-                    HStack(spacing: 10) {
-                        Image(systemName: "wand.and.stars")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.orange)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("未配置数据库密钥，会话仅显示原始哈希")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text("点击一键自动提取密钥，即可自动匹配微信联系人昵称、备注与群聊名称。")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer()
-
-                        Button("一键提取密钥") {
-                            state.showDatabaseKeySheet = true
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
+            // 1. 列表内容与顶上一体化沉浸式毛玻璃 Header
+            if state.scanProgress.isScanning && state.sessions.isEmpty {
+                loadingView
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        unifiedHeaderView
                     }
-                    .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
-                    .padding(.horizontal, 22)
-                    .padding(.top, 10)
-                }
-
-                // 2. 列表内容
-                if state.scanProgress.isScanning && state.sessions.isEmpty {
-                    loadingView
-                } else if filteredSessions.isEmpty {
-                    emptyView
-                } else {
-                    sessionTable
-                }
+            } else if filteredSessions.isEmpty {
+                emptyView
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        unifiedHeaderView
+                    }
+            } else {
+                sessionTable
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        unifiedHeaderView
+                    }
             }
 
-            // 3. 底部悬浮操作条 (Floating Action Bar, Pearcleaner 胶囊风格)
+            // 2. 底部悬浮操作条 (Floating Action Bar, Pearcleaner 胶囊风格)
             if !state.selectedSessionIDs.isEmpty {
                 floatingActionBar
                     .padding(.bottom, 20)
@@ -119,6 +88,48 @@ public struct SessionListView: View {
         .onDisappear {
             removeKeyMonitor()
         }
+    }
+
+    // MARK: - 顶上一体化沉浸式毛玻璃 Header
+    private var unifiedHeaderView: some View {
+        VStack(spacing: 0) {
+            headerView
+                .padding(.horizontal, 22)
+                .padding(.top, 20)
+                .padding(.bottom, 12)
+
+            // 密钥引导横幅 (未配置密钥时显著提示)
+            if !WeChatContactManager.shared.hasKey {
+                HStack(spacing: 10) {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.orange)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("未配置数据库密钥，会话仅显示原始哈希")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("点击一键自动提取密钥，即可自动匹配微信联系人昵称、备注与群聊名称。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button("一键提取密钥") {
+                        state.showDatabaseKeySheet = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+                .padding(.horizontal, 22)
+                .padding(.bottom, 10)
+            }
+
+            Divider()
+        }
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - 键盘快捷键监听
@@ -278,30 +289,14 @@ public struct SessionListView: View {
                 .foregroundStyle(rank <= 3 ? Color.accentColor : Color.secondary)
                 .frame(width: 24, alignment: .center)
 
-            // 会话头像/图标 (优先展示解密后的首个附件缩略图)
-            if let thumbURL = session.firstThumbnailURL {
-                MediaThumbnailView(
-                    item: WeChatFileItem(
-                        url: thumbURL,
-                        size: 0,
-                        category: .attach,
-                        creationDate: .distantPast,
-                        modificationDate: .distantPast
-                    ),
-                    size: 36
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.1))
-                        .frame(width: 36, height: 36)
-
-                    Image(systemName: session.contact != nil ? (session.contact!.id.hasSuffix("@chatroom") ? "person.3.fill" : "person.crop.circle.fill") : "bubble.left.and.bubble.right.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
+            // 会话联系人/群聊真实头像 (优先展示微信真实头像与专属徽章)
+            ContactAvatarView(
+                avatarURL: session.contact?.avatarURL,
+                displayName: session.effectiveName,
+                identifier: session.contact?.id ?? session.id,
+                size: 36,
+                isCircle: false
+            )
 
             // 会话名称与备注
             VStack(alignment: .leading, spacing: 3) {

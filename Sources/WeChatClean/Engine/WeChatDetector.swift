@@ -58,7 +58,8 @@ public struct WeChatDetector: Sendable {
                         url: folder,
                         displayName: displayName,
                         customNickname: profile.nickname,
-                        customWeChatID: profile.wechatId
+                        customWeChatID: profile.wechatId,
+                        avatarURL: profile.avatarURL
                     ))
                 }
             }
@@ -73,7 +74,8 @@ public struct WeChatDetector: Sendable {
                         url: folder,
                         displayName: name,
                         customNickname: profile.nickname,
-                        customWeChatID: profile.wechatId
+                        customWeChatID: profile.wechatId,
+                        avatarURL: profile.avatarURL
                     ))
                 }
             }
@@ -94,24 +96,27 @@ public struct WeChatDetector: Sendable {
     private static let profileKeyPrefix = "wechat_clean_profile_"
     private static let sessionRemarksKeyPrefix = "wechat_clean_session_remarks_"
 
-    /// 读取账号自定义资料（昵称与微信号）
-    public static func loadAccountProfile(for accountID: String) -> (nickname: String?, wechatId: String?) {
+    /// 读取账号自定义资料（昵称、微信号与头像）
+    public static func loadAccountProfile(for accountID: String) -> (nickname: String?, wechatId: String?, avatarURL: String?) {
         let key = profileKeyPrefix + accountID
         guard let dict = UserDefaults.standard.dictionary(forKey: key) else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
-        return (dict["nickname"] as? String, dict["wechatId"] as? String)
+        return (dict["nickname"] as? String, dict["wechatId"] as? String, dict["avatarURL"] as? String)
     }
 
-    /// 保存账号自定义资料
-    public static func saveAccountProfile(for accountID: String, nickname: String?, wechatId: String?) {
+    /// 保存账号自定义资料（支持保存头像 URL）
+    public static func saveAccountProfile(for accountID: String, nickname: String?, wechatId: String?, avatarURL: String? = nil) {
         let key = profileKeyPrefix + accountID
-        var dict: [String: String] = [:]
+        var dict = (UserDefaults.standard.dictionary(forKey: key) as? [String: String]) ?? [:]
         if let nick = nickname, !nick.trimmingCharacters(in: .whitespaces).isEmpty {
             dict["nickname"] = nick
         }
         if let wid = wechatId, !wid.trimmingCharacters(in: .whitespaces).isEmpty {
             dict["wechatId"] = wid
+        }
+        if let avatar = avatarURL, !avatar.trimmingCharacters(in: .whitespaces).isEmpty {
+            dict["avatarURL"] = avatar
         }
         UserDefaults.standard.set(dict, forKey: key)
     }

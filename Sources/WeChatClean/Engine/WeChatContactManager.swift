@@ -42,7 +42,22 @@ public final class WeChatContactManager: @unchecked Sendable {
         public let count: Int
         public let myNickname: String?
         public let myWeChatID: String?
+        public let myAvatarURL: String?
         public let errorMessage: String?
+
+        public init(
+            count: Int,
+            myNickname: String? = nil,
+            myWeChatID: String? = nil,
+            myAvatarURL: String? = nil,
+            errorMessage: String? = nil
+        ) {
+            self.count = count
+            self.myNickname = myNickname
+            self.myWeChatID = myWeChatID
+            self.myAvatarURL = myAvatarURL
+            self.errorMessage = errorMessage
+        }
     }
 
     private let lock = NSLock()
@@ -243,19 +258,30 @@ public final class WeChatContactManager: @unchecked Sendable {
             let total = contactsByID.count
             lock.unlock()
 
-            // 2. 如果识别出本人明文资料，立即持久化保存并写入账号资料库
-            if let nick = myProfile.nickname ?? myProfile.alias, !nick.isEmpty {
-                WeChatDetector.saveAccountProfile(for: account.id, nickname: myProfile.nickname, wechatId: myProfile.alias)
+            // 2. 如果识别出本人明文资料或头像，立即持久化保存并写入账号资料库
+            if (myProfile.nickname != nil || myProfile.alias != nil || myProfile.avatarURL != nil) {
+                WeChatDetector.saveAccountProfile(
+                    for: account.id,
+                    nickname: myProfile.nickname,
+                    wechatId: myProfile.alias,
+                    avatarURL: myProfile.avatarURL
+                )
             }
 
-            return LoadResult(count: total, myNickname: myProfile.nickname, myWeChatID: myProfile.alias, errorMessage: nil)
+            return LoadResult(
+                count: total,
+                myNickname: myProfile.nickname,
+                myWeChatID: myProfile.alias,
+                myAvatarURL: myProfile.avatarURL,
+                errorMessage: nil
+            )
         } catch {
-            return LoadResult(count: 0, myNickname: nil, myWeChatID: nil, errorMessage: "解密或读取 contact.db 失败: \(error.localizedDescription)")
+            return LoadResult(count: 0, myNickname: nil, myWeChatID: nil, myAvatarURL: nil, errorMessage: "解密或读取 contact.db 失败: \(error.localizedDescription)")
         }
     }
 
     /// 动态自适应扫描 SQLite contact.db：遍历所有表并自省列结构，提取联系人及本人信息
-    private func readContactsAndProfileFromDecryptedDB(_ dbURL: URL, accountID: String) throws -> ([WeChatContact], (nickname: String?, alias: String?)) {
+    private func readContactsAndProfileFromDecryptedDB(_ dbURL: URL, accountID: String) throws -> ([WeChatContact], (nickname: String?, alias: String?, avatarURL: String?)) {
         var db: OpaquePointer?
         // 使用标准读写模式打开临时解密数据库，避免 WAL 共享内存创建失败 (SQLITE_CANTOPEN 14)
         guard sqlite3_open(dbURL.path, &db) == SQLITE_OK else {
@@ -289,6 +315,7 @@ public final class WeChatContactManager: @unchecked Sendable {
         var contacts: [WeChatContact] = []
         var detectedMyNickname: String?
         var detectedMyAlias: String?
+        var detectedMyAvatarURL: String?
 
         let normalizedAccountID: String
         let baseAccountID: String
@@ -315,12 +342,12 @@ public final class WeChatContactManager: @unchecked Sendable {
                 sqlite3_finalize(stmtCols)
             }
 
-            // 识别列
+            // 识别列 (适配微信 4.x small_head_url / big_head_url 及旧版字段)
             let idCol = columnNames.first(where: { ["username", "m_nsusrname", "usrname", "wxid"].contains($0.lowercased()) })
             let nickCol = columnNames.first(where: { ["nick_name", "m_nsnickname", "nickname"].contains($0.lowercased()) })
             let remarkCol = columnNames.first(where: { ["remark", "m_nsremark", "conremark"].contains($0.lowercased()) })
             let aliasCol = columnNames.first(where: { ["alias", "m_nsaliasname", "alias_name"].contains($0.lowercased()) })
-            let headCol = columnNames.first(where: { ["m_nsheadimgurl", "head_img_url", "avatar_url"].contains($0.lowercased()) })
+            let headCol = columnNames.first(where: { ["small_head_url", "m_nsheadimgurl", "head_img_url", "big_head_url", "avatar_url"].contains($0.lowercased()) })
 
             guard let finalIdCol = idCol else { continue }
 
@@ -354,13 +381,15 @@ public final class WeChatContactManager: @unchecked Sendable {
                     let nickName = nickIdx >= 0 ? (sqlite3_column_text(stmt, Int32(nickIdx)).map { String(cString: $0) } ?? "") : ""
                     let remark = remarkIdx >= 0 ? sqlite3_column_text(stmt, Int32(remarkIdx)).map { String(cString: $0) } : nil
                     let alias = aliasIdx >= 0 ? sqlite3_column_text(stmt, Int32(aliasIdx)).map { String(cString: $0) } : nil
-                    let head = headIdx >= 0 ? sqlite3_column_text(stmt, Int32(headIdx)).map { String(cString: $0) } : nil
+                    let headRaw = headIdx >= 0 ? sqlite3_column_text(stmt, Int32(headIdx)).map { String(cString: $0) } : nil
+                    let head = (headRaw?.trimmingCharacters(in: .whitespaces).isEmpty ?? true) ? nil : headRaw
 
                     // 检查是否为当前登录用户本人
                     let isSelf = (usrName == accountID || usrName == normalizedAccountID || usrName.contains(baseAccountID))
                     if isSelf || (detectedMyNickname == nil && usrName.hasPrefix("wxid_") && usrName.contains(baseAccountID)) {
                         if !nickName.isEmpty { detectedMyNickname = nickName }
                         if let alias, !alias.isEmpty { detectedMyAlias = alias }
+                        if let head, !head.isEmpty { detectedMyAvatarURL = head }
                     }
 
                     contacts.append(WeChatContact(id: usrName, nickname: nickName, remark: remark, avatarURL: head))
@@ -373,7 +402,7 @@ public final class WeChatContactManager: @unchecked Sendable {
             }
         }
 
-        return (contacts, (detectedMyNickname, detectedMyAlias))
+        return (contacts, (detectedMyNickname, detectedMyAlias, detectedMyAvatarURL))
     }
 
     /// 根据 msg/attach 下的 32 位 MD5 目录名匹配真实联系人

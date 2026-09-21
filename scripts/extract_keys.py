@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-微信 4.x 数据库密钥提取器（macOS 专用，纯原生 Python + Mach VM / LLDB）
-参考 wx-cli-again 实现，无需第三方依赖，可由 App 提权或终端一键执行。
+微信 4.x 数据库与附件图片密钥提取器（macOS 专用，纯原生 Python + Mach VM / CommonCrypto）
+支持提取：
+1. SQLCipher 4 数据库密钥 (contact.db, session.db, message_x.db 等)
+2. V2 .dat 图片 AES-128-ECB 解密密钥与 XOR 异或密钥
+无需第三方依赖，可由 App 原生 Touch ID / Apple Watch 提权或终端一键执行。
 """
 
 import sys
@@ -75,6 +78,27 @@ mach_vm_deallocate.argtypes = [ctypes.c_uint, ctypes.c_uint64, ctypes.c_uint64]
 mach_vm_deallocate.restype = ctypes.c_int
 
 
+def aes_ecb_decrypt(key_bytes, cipher_bytes):
+    """使用 macOS 原生 libcommonCrypto CCCrypt 解密单块 AES-128-ECB"""
+    if len(key_bytes) != 16 or len(cipher_bytes) != 16:
+        return None
+    out_buf = (ctypes.c_uint8 * 32)()
+    num_bytes = ctypes.c_size_t(0)
+    status = libc.CCCrypt(
+        1,  # kCCDecrypt
+        0,  # kCCAlgorithmAES
+        2,  # kCCOptionECBMode
+        key_bytes, 16,
+        None,
+        cipher_bytes, 16,
+        out_buf, 32,
+        ctypes.byref(num_bytes)
+    )
+    if status == 0 and num_bytes.value >= 16:
+        return bytes(out_buf[:num_bytes.value])
+    return None
+
+
 def find_wechat_pid():
     res = subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True, text=True)
     if res.returncode == 0 and res.stdout.strip():
@@ -94,6 +118,45 @@ def verify_hmac_page1(page, enc_key_bytes):
     data_to_mac = content + iv + (1).to_bytes(4, "little")
     computed = hmac.new(mac_key, data_to_mac, hashlib.sha512).digest()
     return hmac.compare_digest(computed, stored)
+
+
+def find_sample_v2_info(target_path):
+    """从附件目录中探测 V2 .dat 密文块与确定的 xor_key"""
+    v2_magic = b"\x07\x08V2\x08\x07"
+    search_dir = target_path
+    if os.path.isfile(target_path):
+        search_dir = os.path.dirname(target_path)
+
+    account_dir = search_dir
+    while account_dir and account_dir != "/" and not os.path.exists(os.path.join(account_dir, "msg")):
+        parent = os.path.dirname(account_dir)
+        if parent == account_dir:
+            break
+        account_dir = parent
+
+    attach_dir = os.path.join(account_dir, "msg", "attach")
+    if not os.path.exists(attach_dir):
+        attach_dir = search_dir
+
+    for root, _, files in os.walk(attach_dir):
+        for f in files:
+            if f.endswith("_t.dat") or (f.endswith(".dat") and not f.endswith("_h.dat")):
+                full = os.path.join(root, f)
+                try:
+                    sz = os.path.getsize(full)
+                    if 64 <= sz <= 2 * 1024 * 1024:
+                        with open(full, "rb") as fp:
+                            head = fp.read(31)
+                            if head[:6] == v2_magic:
+                                fp.seek(sz - 2)
+                                tail = fp.read(2)
+                                if len(tail) == 2 and (tail[0] ^ 0xFF == tail[1] ^ 0xD9):
+                                    xor_key = tail[0] ^ 0xFF
+                                    cipher16 = head[15:31]
+                                    return cipher16, xor_key, full
+                except Exception:
+                    pass
+    return None, None, None
 
 
 def collect_dbs_from_json(json_path):
@@ -141,12 +204,14 @@ def collect_dbs(db_storage_dir):
     return dbs
 
 
-def scan_memory_keys(task, db_list):
+def scan_memory_keys(task, db_list, v2_cipher=None):
     salts = [db["salt"] for db in db_list]
     raw_patterns = re.compile(rb"x'([0-9a-fA-F]{64})([0-9a-fA-F]{32})'")
-    
+    re_ascii_key = re.compile(rb"(?<![a-zA-Z0-9])[a-zA-Z0-9]{16,32}(?![a-zA-Z0-9])")
+
     candidates = set()
     salt_adjacent = set()
+    found_image_key = None
 
     addr = ctypes.c_uint64(0)
     info_count_expected = ctypes.c_uint32(9)
@@ -180,7 +245,7 @@ def scan_memory_keys(task, db_list):
         readable = (info.protection & VM_PROT_READ) != 0
         writable = (info.protection & VM_PROT_WRITE) != 0
 
-        # 堆上内存：优先扫描读写区域或较小的只读块
+        # 堆上内存：扫描读写区域或只读代码块
         if readable and (writable or region_size <= 64 * 1024 * 1024) and 0 < region_size < 512 * 1024 * 1024:
             end_addr = current_addr + region_size
             ca = current_addr
@@ -209,17 +274,24 @@ def scan_memory_keys(task, db_list):
                             idx = buf.find(s, start_pos)
                             if idx == -1:
                                 break
-                            # 前向 32 字节
                             if idx >= 32:
                                 salt_adjacent.add(buf[idx - 32:idx].hex().lower())
-                            # 后向 32 字节
                             if idx + len(s) + 32 <= len(buf):
                                 salt_adjacent.add(buf[idx + len(s):idx + len(s) + 32].hex().lower())
                             start_pos = idx + 1
 
+                    # 3. 扫描图片 AES 密钥（若提供了样本密文且尚未找到）
+                    if v2_cipher and not found_image_key:
+                        for m in re_ascii_key.finditer(buf):
+                            cand_ascii = m.group()[:16]
+                            dec = aes_ecb_decrypt(cand_ascii, v2_cipher)
+                            if dec:
+                                if dec[:3] == b"\xFF\xD8\xFF" or dec[:4] == b"\x89PNG":
+                                    found_image_key = cand_ascii.decode("ascii")
+                                    break
+
                     mach_vm_deallocate(mach_task_self(), data_ptr.value, dc.value)
 
-                # 重叠 128 字节防跨边界
                 if cs > 128:
                     ca += cs - 128
                 else:
@@ -227,7 +299,8 @@ def scan_memory_keys(task, db_list):
 
         addr = ctypes.c_uint64(current_addr + region_size)
 
-    return list(candidates) + list(salt_adjacent)
+    all_cands = list(candidates) + list(salt_adjacent)
+    return all_cands, found_image_key
 
 
 def get_real_user_home():
@@ -242,24 +315,24 @@ def get_real_user_home():
 
 
 def main():
-    print("=== 微信 4.x 本地数据库密钥提取器 ===")
-    
+    print("=== 微信 4.x 本地数据库与附件密钥提取器 ===")
+
     if len(sys.argv) < 2:
         print("用法: sudo python3 extract_keys.py <db_storage_dir | db_info.json> [output_json]")
-        # 尝试自动定位用户微信目录
         home = get_real_user_home()
-        xwechat_dir = os.path.join(home, "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
-        if os.path.exists(xwechat_dir):
-            for item in os.listdir(xwechat_dir):
-                if item.startswith("wxid_") or os.path.isdir(os.path.join(xwechat_dir, item, "db_storage")):
-                    db_storage_dir = os.path.join(xwechat_dir, item, "db_storage")
-                    output_json = os.path.join(home, ".config/wx-cli/all_keys.json")
-                    print(f"[*] 自动发现微信数据目录: {db_storage_dir}")
-                    run_extraction(db_storage_dir, output_json)
-                    return
-        sys.exit(1)
+        xwechat = os.path.join(home, "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+        if os.path.exists(xwechat):
+            for acc in os.listdir(xwechat):
+                cand = os.path.join(xwechat, acc, "db_storage")
+                if os.path.exists(cand):
+                    print(f"[*] 自动定位到账号目录: {cand}")
+                    input_target = cand
+                    break
+        else:
+            sys.exit(1)
+    else:
+        input_target = sys.argv[1]
 
-    input_target = sys.argv[1]
     home = get_real_user_home()
     default_output = os.path.join(home, ".config/wx-cli/all_keys.json")
     output_json = sys.argv[2] if len(sys.argv) > 2 else default_output
@@ -274,7 +347,11 @@ def run_extraction(input_target, output_json):
 
     print(f"[+] 微信正在运行 (PID: {pid})")
 
-    # 判断 input_target 是 JSON 还是目录
+    # 尝试寻找样本 V2 图片密文与 xor_key
+    sample_cipher, sample_xor, sample_path = find_sample_v2_info(input_target)
+    if sample_cipher:
+        print(f"[+] 发现 V2 图片样本: {os.path.basename(sample_path)} (XOR Key: 0x{sample_xor:02x})")
+
     if os.path.isfile(input_target) and input_target.endswith(".json"):
         print(f"[+] 从描述文件加载数据库信息: {input_target}")
         dbs = collect_dbs_from_json(input_target)
@@ -282,9 +359,6 @@ def run_extraction(input_target, output_json):
         dbs = collect_dbs(input_target)
 
     print(f"[+] 目标包含 {len(dbs)} 个待匹配数据库")
-    if not dbs:
-        print(f"[-] 未发现任何待匹配的加密数据库信息: {input_target}")
-        sys.exit(3)
 
     task = ctypes.c_uint()
     kr = task_for_pid(mach_task_self(), pid, ctypes.byref(task))
@@ -296,7 +370,7 @@ def run_extraction(input_target, output_json):
 
     print(f"[+] 成功获取微信进程 Task Port: {task.value}，开始扫描内存...")
     start_time = time.time()
-    candidates = scan_memory_keys(task.value, dbs)
+    candidates, image_key = scan_memory_keys(task.value, dbs, sample_cipher)
     print(f"[+] 扫描完成（耗时 {time.time() - start_time:.2f}s），获得 {len(candidates)} 个候选密钥")
 
     matched_keys = {}
@@ -310,36 +384,33 @@ def run_extraction(input_target, output_json):
                         matched_keys[db["rel"]] = cand
                         matched_keys[db["name"]] = cand
                         matched_set.add(cand)
-                        # 兼容 contact/contact.db 或 contact.db 两种索引
                         if "contact" in db["rel"]:
                             matched_keys["contact.db"] = cand
                             matched_keys["contact"] = cand
                         if "session" in db["rel"]:
                             matched_keys["session.db"] = cand
                             matched_keys["session"] = cand
-                        print(f"  [✓] 匹配成功: {db['rel']} -> {cand[:16]}...{cand[-8:]}")
+                        print(f"  [✓] 数据库匹配成功: {db['rel']} -> {cand[:16]}...{cand[-8:]}")
                         break
                 except Exception:
                     pass
 
-    # 将所有候选也保存一份以备后用
-    output_data = {
-        "matched": matched_keys,
-        "candidates": list(set(candidates))
-    }
-    # 扁平化合并以便直接作为 key-map 使用
     final_output = {}
     final_output.update(matched_keys)
     final_output["_candidates"] = list(set(candidates))
 
+    if image_key:
+        final_output["image_aes_key"] = image_key
+        if sample_xor is not None:
+            final_output["image_xor_key"] = sample_xor
+        print(f"  [✓] V2 图片 AES 密钥匹配成功: {image_key} (XOR: 0x{sample_xor:02x})")
+
     print(f"[+] 共成功匹配 {len(matched_set)} 个核心数据库密钥！")
 
-    # 写入 JSON
     os.makedirs(os.path.dirname(output_json), exist_ok=True)
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(final_output, f, indent=2)
 
-    # 确保文件权限允许当前非 root 用户读写
     try:
         sudo_uid = os.environ.get("SUDO_UID")
         sudo_gid = os.environ.get("SUDO_GID")
