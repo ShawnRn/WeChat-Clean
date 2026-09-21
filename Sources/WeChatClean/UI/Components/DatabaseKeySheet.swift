@@ -1,8 +1,7 @@
 import SwiftUI
 import AppKit
-import LocalAuthentication
 
-/// 数据库密钥配置弹窗（支持 Touch ID / Apple Watch 生物识别预鉴权、多账号分别提取及 64 位 Hex 密钥）
+/// 数据库密钥配置弹窗（支持多账号分别提取及 64 位 Hex 密钥）
 public struct DatabaseKeySheet: View {
     @Bindable var state: AppState
     @Environment(\.dismiss) private var dismiss
@@ -108,7 +107,7 @@ public struct DatabaseKeySheet: View {
 
             // 3. 导入与提取区域
             VStack(alignment: .leading, spacing: 14) {
-                // 方式 A: 一键自动提取 (支持 Touch ID / Apple Watch 与系统提权)
+                // 方式 A: 一键自动提取 (macOS 标准管理员授权)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -116,18 +115,14 @@ public struct DatabaseKeySheet: View {
                                 Text("方式一：一键自动提取 (推荐)")
                                     .font(.system(size: 12, weight: .bold))
 
-                                HStack(spacing: 3) {
-                                    Image(systemName: "touchid")
-                                    Image(systemName: "applewatch")
-                                    Text("触控ID / 手表")
-                                }
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(Color.accentColor))
+                                Text("免手动")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.accentColor))
                             }
-                            Text("请求触控 ID、Apple Watch 或管理员权限，自动提取当前账号密钥")
+                            Text("调用系统标准提权向您请求管理员权限，自动提取当前账号密钥")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
@@ -135,7 +130,7 @@ public struct DatabaseKeySheet: View {
                         Spacer()
 
                         Button {
-                            startExtractionFlow()
+                            autoExtractKeys()
                         } label: {
                             HStack(spacing: 6) {
                                 if isExtracting {
@@ -302,43 +297,11 @@ public struct DatabaseKeySheet: View {
         isError = false
     }
 
-    // MARK: - 生物识别（Touch ID / Apple Watch）鉴权流
-    private func startExtractionFlow() {
-        guard !isExtracting else { return }
-        let context = LAContext()
-        context.localizedCancelTitle = "取消"
-        var authError: NSError?
-
-        let accountName = state.selectedAccount?.displayTitle ?? "微信账号"
-        let reason = "使用触控 ID 或 Apple Watch 验证以提取「\(accountName)」的数据库密钥"
-
-        if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) {
-            isExtracting = true
-            statusMessage = "请轻触触控 ID、双击 Apple Watch 侧边按钮或输入密码..."
-            isError = false
-
-            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, evalError in
-                Task { @MainActor in
-                    if success {
-                        self.autoExtractKeys()
-                    } else {
-                        self.isExtracting = false
-                        let errDesc = evalError?.localizedDescription ?? "用户已取消认证"
-                        self.statusMessage = "认证未完成: \(errDesc)"
-                        self.isError = true
-                    }
-                }
-            }
-        } else {
-            // 设备不支持生物识别，直接进行底层提权
-            autoExtractKeys()
-        }
-    }
-
     // MARK: - 调用系统管理员提权自动提取微信密钥
     private func autoExtractKeys() {
+        guard !isExtracting else { return }
         isExtracting = true
-        statusMessage = "正在准备「\(state.selectedAccount?.displayTitle ?? "当前账号")」数据库并扫描内存密钥..."
+        statusMessage = "正在准备「\(state.selectedAccount?.displayTitle ?? "当前账号")」数据库并请求管理员授权..."
         isError = false
 
         let home = WeChatDetector.realHomeDirectory.path

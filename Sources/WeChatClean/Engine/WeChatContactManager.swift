@@ -257,10 +257,15 @@ public final class WeChatContactManager: @unchecked Sendable {
     /// 动态自适应扫描 SQLite contact.db：遍历所有表并自省列结构，提取联系人及本人信息
     private func readContactsAndProfileFromDecryptedDB(_ dbURL: URL, accountID: String) throws -> ([WeChatContact], (nickname: String?, alias: String?)) {
         var db: OpaquePointer?
-        guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        // 使用标准读写模式打开临时解密数据库，避免 WAL 共享内存创建失败 (SQLITE_CANTOPEN 14)
+        guard sqlite3_open(dbURL.path, &db) == SQLITE_OK else {
             throw NSError(domain: "WeChatContactManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法打开 SQLite 数据库"])
         }
         defer { sqlite3_close(db) }
+
+        // 关闭 journal 以加速读取并释放文件锁
+        sqlite3_exec(db, "PRAGMA journal_mode = OFF;", nil, nil, nil)
+        sqlite3_exec(db, "PRAGMA synchronous = OFF;", nil, nil, nil)
 
         // 1. 获取所有表名
         var tables: [String] = []
