@@ -30,6 +30,7 @@ if [ -f "$DIR/Resources/Info.plist" ]; then
 fi
 
 echo "==> 清除属性并进行本地代码签名..."
+dot_clean "$APP_DIR" || true
 xattr -cr "$APP_DIR" || true
 codesign --force --deep --sign - "$APP_DIR" || true
 

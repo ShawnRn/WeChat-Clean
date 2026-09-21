@@ -136,7 +136,8 @@ public struct SidebarView: View {
     // MARK: - 密钥状态与一键提取卡片
     @ViewBuilder
     private var keyStatusSection: some View {
-        let hasKey = WeChatContactManager.shared.hasKey
+        let accountID = state.selectedAccount?.id ?? ""
+        let hasKey = WeChatContactManager.shared.hasKey(for: accountID)
         let contactCount = WeChatContactManager.shared.loadedContactCount
 
         if !hasKey {

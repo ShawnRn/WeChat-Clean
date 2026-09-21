@@ -34,29 +34,40 @@ public struct WeChatContact: Identifiable, Sendable, Codable, Hashable {
     }
 }
 
-/// 微信联系人管理器（负责联系人数据加载、双向散列索引与会话映射）
+/// 微信联系人管理器（负责联系人数据加载、双向散列索引、多账号隔离与本人明文资料提取）
 public final class WeChatContactManager: @unchecked Sendable {
     public static let shared = WeChatContactManager()
+
+    public struct LoadResult: Sendable {
+        public let count: Int
+        public let myNickname: String?
+        public let myWeChatID: String?
+        public let errorMessage: String?
+    }
 
     private let lock = NSLock()
     private var contactsByMD5: [String: WeChatContact] = [:]
     private var contactsByID: [String: WeChatContact] = [:]
-    private var dbKeys: [String: String] = [:] // dbName -> 64-hex key
+    // 按账号隔离存储密钥: accountID -> (dbName -> 64-hex key)
+    private var keysByAccount: [String: [String: String]] = [:]
+    private var globalKeys: [String: String] = [:]
+    private var activeAccountID: String?
 
     private init() {
         loadCachedKeys()
     }
 
-    /// 读取已缓存的数据库密钥
+    /// 读取已缓存的数据库密钥（按账号隔离加载，并兼容全局历史配置）
     private func loadCachedKeys() {
         lock.lock()
         defer { lock.unlock() }
 
+        // 1. 读取全局历史配置
         if let saved = UserDefaults.standard.dictionary(forKey: "wechat_db_keys") as? [String: String] {
-            dbKeys.merge(saved) { (_, new) in new }
+            globalKeys = saved
         }
 
-        // 尝试从 ~/.config/wx-cli/all_keys.json 读取
+        // 2. 尝试从 ~/.config/wx-cli/all_keys.json 读取通用 fallback
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidatePaths = [
             "\(home)/.config/wx-cli/all_keys.json",
@@ -71,19 +82,46 @@ public final class WeChatContactManager: @unchecked Sendable {
 
             for (k, v) in json {
                 if let keyStr = v as? String, keyStr.count == 64 {
-                    dbKeys[k] = keyStr
+                    globalKeys[k] = keyStr
                 } else if let dict = v as? [String: Any], let keyStr = dict["key"] as? String, keyStr.count == 64 {
-                    dbKeys[k] = keyStr
+                    globalKeys[k] = keyStr
                 }
             }
         }
     }
 
-    /// 是否已配置数据库密钥
-    public var hasKey: Bool {
+    /// 切换当前活跃账号，自动载入该账号专属密钥并重载联系人缓存
+    public func switchAccount(to account: WeChatAccount) {
+        lock.lock()
+        activeAccountID = account.id
+        contactsByMD5.removeAll()
+        contactsByID.removeAll()
+
+        // 载入该账号的专属配置
+        let accKey = "wechat_db_keys_\(account.id)"
+        if let saved = UserDefaults.standard.dictionary(forKey: accKey) as? [String: String] {
+            keysByAccount[account.id] = saved
+        }
+        lock.unlock()
+
+        // 异步或同步执行一次该账号的联系人加载
+        loadContacts(for: account)
+    }
+
+    /// 是否已为指定账号配置数据库密钥
+    public func hasKey(for accountID: String? = nil) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return dbKeys["contact.db"] != nil || dbKeys["contact"] != nil
+        let target = accountID ?? activeAccountID
+        if let target, let accMap = keysByAccount[target], !accMap.isEmpty {
+            return accMap["contact.db"] != nil || accMap["contact"] != nil
+        }
+        return globalKeys["contact.db"] != nil || globalKeys["contact"] != nil
+    }
+
+    /// 当前活跃账号是否已配置数据库密钥
+    public var hasKey: Bool {
+        hasKey(for: nil)
     }
 
     /// 当前已加载的联系人总数
@@ -93,74 +131,111 @@ public final class WeChatContactManager: @unchecked Sendable {
         return contactsByID.count
     }
 
-    /// 从 JSON 文件（如 all_keys.json）中导入密钥
-    public func importKeys(from fileURL: URL) -> Bool {
+    /// 获取特定数据库密钥（优先取当前账号专属，次选全局）
+    public func getKey(forDatabase dbName: String, accountID: String? = nil) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let target = accountID ?? activeAccountID
+        if let target, let map = keysByAccount[target], let key = map[dbName] {
+            return key
+        }
+        return globalKeys[dbName]
+    }
+
+    /// 保存单个数据库密钥（区分账号隔离）
+    public func setKey(_ hexKey: String, forDatabase dbName: String, accountID: String? = nil) {
+        lock.lock()
+        let clean = hexKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = accountID ?? activeAccountID
+
+        if let target {
+            var map = keysByAccount[target] ?? [:]
+            map[dbName] = clean
+            keysByAccount[target] = map
+            UserDefaults.standard.set(map, forKey: "wechat_db_keys_\(target)")
+        } else {
+            globalKeys[dbName] = clean
+            UserDefaults.standard.set(globalKeys, forKey: "wechat_db_keys")
+        }
+        lock.unlock()
+    }
+
+    /// 批量保存某账号提取的所有密钥
+    public func setKeys(_ keys: [String: String], forAccount accountID: String) {
+        lock.lock()
+        var map = keysByAccount[accountID] ?? [:]
+        map.merge(keys) { (_, new) in new }
+        keysByAccount[accountID] = map
+        UserDefaults.standard.set(map, forKey: "wechat_db_keys_\(accountID)")
+        // 同时作为 fallback 写入全局
+        globalKeys.merge(keys) { (_, new) in new }
+        UserDefaults.standard.set(globalKeys, forKey: "wechat_db_keys")
+        lock.unlock()
+    }
+
+    /// 清除指定账号（或全局）已配置的密钥与联系人缓存
+    public func clearKeys(for accountID: String? = nil) {
+        lock.lock()
+        let target = accountID ?? activeAccountID
+        if let target {
+            keysByAccount.removeValue(forKey: target)
+            UserDefaults.standard.removeObject(forKey: "wechat_db_keys_\(target)")
+        } else {
+            globalKeys.removeAll()
+            UserDefaults.standard.removeObject(forKey: "wechat_db_keys")
+        }
+        contactsByMD5.removeAll()
+        contactsByID.removeAll()
+        lock.unlock()
+    }
+
+    /// 从 JSON 文件导入密钥（绑定至当前账号）
+    public func importKeys(from fileURL: URL, forAccount accountID: String? = nil) -> Bool {
         guard let data = try? Data(contentsOf: fileURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return false
         }
-        var found = false
-        lock.lock()
+        var imported: [String: String] = [:]
         for (k, v) in json {
             if let keyStr = v as? String, keyStr.count == 64 {
-                dbKeys[k] = keyStr
-                found = true
+                imported[k] = keyStr
             } else if let dict = v as? [String: Any], let keyStr = dict["key"] as? String, keyStr.count == 64 {
-                dbKeys[k] = keyStr
-                found = true
+                imported[k] = keyStr
             }
         }
-        if found {
-            UserDefaults.standard.set(dbKeys, forKey: "wechat_db_keys")
-        }
-        lock.unlock()
-        return found
+        guard !imported.isEmpty else { return false }
+
+        let target = accountID ?? activeAccountID ?? "default"
+        setKeys(imported, forAccount: target)
+        return true
     }
 
-    /// 清除已配置的密钥与联系人缓存
-    public func clearKeys() {
-        lock.lock()
-        dbKeys.removeAll()
-        contactsByMD5.removeAll()
-        contactsByID.removeAll()
-        UserDefaults.standard.removeObject(forKey: "wechat_db_keys")
-        lock.unlock()
-    }
-
-    /// 保存单个数据库密钥
-    public func setKey(_ hexKey: String, forDatabase dbName: String) {
-        lock.lock()
-        let clean = hexKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        dbKeys[dbName] = clean
-        UserDefaults.standard.set(dbKeys, forKey: "wechat_db_keys")
-        lock.unlock()
-    }
-
-    /// 获取特定数据库密钥
-    public func getKey(forDatabase dbName: String) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return dbKeys[dbName]
-    }
-
-    /// 针对指定账号加载联系人并返回加载成功的联系人数量
+    /// 针对指定账号加载联系人并自动提取本人真实昵称与微信号
     @discardableResult
-    public func loadContacts(for account: WeChatAccount) -> Int {
+    public func loadContacts(for account: WeChatAccount) -> LoadResult {
         let contactDBURL = account.url.appendingPathComponent("db_storage/contact/contact.db")
-        guard FileManager.default.fileExists(atPath: contactDBURL.path) else { return 0 }
+        guard FileManager.default.fileExists(atPath: contactDBURL.path) else {
+            return LoadResult(count: 0, myNickname: nil, myWeChatID: nil, errorMessage: "未找到联系人数据库: \(contactDBURL.path)")
+        }
 
-        // 获取 contact.db 密钥
-        guard let keyHex = getKey(forDatabase: "contact.db") ?? getKey(forDatabase: "contact"),
+        // 1. 获取该账号专属 contact.db 密钥
+        guard let keyHex = getKey(forDatabase: "contact.db", accountID: account.id)
+                ?? getKey(forDatabase: "contact/contact.db", accountID: account.id)
+                ?? getKey(forDatabase: "contact", accountID: account.id)
+                ?? getKey(forDatabase: "contact.db")
+                ?? getKey(forDatabase: "contact"),
               let keyData = hexToData(keyHex), keyData.count == 32 else {
-            return 0
+            return LoadResult(count: 0, myNickname: nil, myWeChatID: nil, errorMessage: "未配置该账号的 64 位 contact.db 密钥")
         }
 
         let tempDB = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("wechat_clean_contact_\(account.id).db")
 
         do {
             try SQLCipherDecryptor.decryptDatabase(at: contactDBURL, to: tempDB, key: keyData)
-            let loaded = try readContactsFromDecryptedDB(tempDB)
+            let (loaded, myProfile) = try readContactsAndProfileFromDecryptedDB(tempDB, accountID: account.id)
+
             lock.lock()
+            activeAccountID = account.id
             for c in loaded {
                 contactsByMD5[c.chatMD5] = c
                 contactsByID[c.id] = c
@@ -168,69 +243,132 @@ public final class WeChatContactManager: @unchecked Sendable {
             let total = contactsByID.count
             lock.unlock()
 
-            // 自动检测是否包含当前用户自身，如果有则更新当前账号的显示昵称
-            let normalizedAccountID: String
-            if account.id.hasPrefix("wxid_") {
-                let stripped = String(account.id.dropFirst(5))
-                normalizedAccountID = "wxid_" + (stripped.components(separatedBy: "_").first ?? stripped)
-            } else {
-                normalizedAccountID = account.id
+            // 2. 如果识别出本人明文资料，立即持久化保存并写入账号资料库
+            if let nick = myProfile.nickname ?? myProfile.alias, !nick.isEmpty {
+                WeChatDetector.saveAccountProfile(for: account.id, nickname: myProfile.nickname, wechatId: myProfile.alias)
             }
 
-            if let me = loaded.first(where: { $0.id == account.id || $0.id == normalizedAccountID }) {
-                WeChatDetector.saveAccountProfile(for: account.id, nickname: me.nickname, wechatId: me.id)
-            }
-
-            return total
+            return LoadResult(count: total, myNickname: myProfile.nickname, myWeChatID: myProfile.alias, errorMessage: nil)
         } catch {
-            print("Failed to decrypt or load contact.db: \(error)")
-            return 0
+            return LoadResult(count: 0, myNickname: nil, myWeChatID: nil, errorMessage: "解密或读取 contact.db 失败: \(error.localizedDescription)")
         }
     }
 
-    /// 从已解密的 SQLite contact.db 中读取联系人（同时兼容 4.x contact 与 3.x Contact 表）
-    private func readContactsFromDecryptedDB(_ dbURL: URL) throws -> [WeChatContact] {
+    /// 动态自适应扫描 SQLite contact.db：遍历所有表并自省列结构，提取联系人及本人信息
+    private func readContactsAndProfileFromDecryptedDB(_ dbURL: URL, accountID: String) throws -> ([WeChatContact], (nickname: String?, alias: String?)) {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
             throw NSError(domain: "WeChatContactManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法打开 SQLite 数据库"])
         }
         defer { sqlite3_close(db) }
 
+        // 1. 获取所有表名
+        var tables: [String] = []
+        var stmtTables: OpaquePointer?
+        if sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table';", -1, &stmtTables, nil) == SQLITE_OK {
+            defer { sqlite3_finalize(stmtTables) }
+            while sqlite3_step(stmtTables) == SQLITE_ROW {
+                if let name = sqlite3_column_text(stmtTables, 0).map({ String(cString: $0) }) {
+                    let lower = name.lowercased()
+                    if lower.contains("contact") && !lower.contains("_fts") && !lower.contains("head_image") {
+                        tables.append(name)
+                    }
+                }
+            }
+        }
+
+        if tables.isEmpty {
+            tables = ["contact", "Contact"]
+        }
+
         var contacts: [WeChatContact] = []
+        var detectedMyNickname: String?
+        var detectedMyAlias: String?
 
-        // 1. 微信 4.x 结构：表名为 contact，字段为 username, nick_name, remark, verify_flag
-        let queryV4 = "SELECT username, nick_name, remark FROM contact WHERE username IS NOT NULL AND username != '';"
-        var stmtV4: OpaquePointer?
-        if sqlite3_prepare_v2(db, queryV4, -1, &stmtV4, nil) == SQLITE_OK {
-            defer { sqlite3_finalize(stmtV4) }
-            while sqlite3_step(stmtV4) == SQLITE_ROW {
-                let usrName = sqlite3_column_text(stmtV4, 0).map { String(cString: $0) } ?? ""
-                let nickName = sqlite3_column_text(stmtV4, 1).map { String(cString: $0) } ?? ""
-                let remark = sqlite3_column_text(stmtV4, 2).map { String(cString: $0) }
-                guard !usrName.isEmpty else { continue }
-                contacts.append(WeChatContact(id: usrName, nickname: nickName, remark: remark, avatarURL: nil))
+        let normalizedAccountID: String
+        let baseAccountID: String
+        if accountID.hasPrefix("wxid_") {
+            let stripped = String(accountID.dropFirst(5))
+            let pure = stripped.components(separatedBy: "_").first ?? stripped
+            normalizedAccountID = "wxid_" + pure
+            baseAccountID = pure
+        } else {
+            normalizedAccountID = accountID
+            baseAccountID = accountID
+        }
+
+        for table in tables {
+            // 2. 自省列结构
+            var columnNames: [String] = []
+            var stmtCols: OpaquePointer?
+            if sqlite3_prepare_v2(db, "PRAGMA table_info(\"\(table)\");", -1, &stmtCols, nil) == SQLITE_OK {
+                while sqlite3_step(stmtCols) == SQLITE_ROW {
+                    if let colName = sqlite3_column_text(stmtCols, 1).map({ String(cString: $0) }) {
+                        columnNames.append(colName)
+                    }
+                }
+                sqlite3_finalize(stmtCols)
             }
+
+            // 识别列
+            let idCol = columnNames.first(where: { ["username", "m_nsusrname", "usrname", "wxid"].contains($0.lowercased()) })
+            let nickCol = columnNames.first(where: { ["nick_name", "m_nsnickname", "nickname"].contains($0.lowercased()) })
+            let remarkCol = columnNames.first(where: { ["remark", "m_nsremark", "conremark"].contains($0.lowercased()) })
+            let aliasCol = columnNames.first(where: { ["alias", "m_nsaliasname", "alias_name"].contains($0.lowercased()) })
+            let headCol = columnNames.first(where: { ["m_nsheadimgurl", "head_img_url", "avatar_url"].contains($0.lowercased()) })
+
+            guard let finalIdCol = idCol else { continue }
+
+            var selectFields = ["\"\(finalIdCol)\""]
+            var nickIdx = -1, remarkIdx = -1, aliasIdx = -1, headIdx = -1
+
+            if let nickCol {
+                nickIdx = selectFields.count
+                selectFields.append("\"\(nickCol)\"")
+            }
+            if let remarkCol {
+                remarkIdx = selectFields.count
+                selectFields.append("\"\(remarkCol)\"")
+            }
+            if let aliasCol {
+                aliasIdx = selectFields.count
+                selectFields.append("\"\(aliasCol)\"")
+            }
+            if let headCol {
+                headIdx = selectFields.count
+                selectFields.append("\"\(headCol)\"")
+            }
+
+            let query = "SELECT \(selectFields.joined(separator: ", ")) FROM \"\(table)\" WHERE \"\(finalIdCol)\" IS NOT NULL AND \"\(finalIdCol)\" != '';"
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let usrName = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
+                    guard !usrName.isEmpty else { continue }
+
+                    let nickName = nickIdx >= 0 ? (sqlite3_column_text(stmt, Int32(nickIdx)).map { String(cString: $0) } ?? "") : ""
+                    let remark = remarkIdx >= 0 ? sqlite3_column_text(stmt, Int32(remarkIdx)).map { String(cString: $0) } : nil
+                    let alias = aliasIdx >= 0 ? sqlite3_column_text(stmt, Int32(aliasIdx)).map { String(cString: $0) } : nil
+                    let head = headIdx >= 0 ? sqlite3_column_text(stmt, Int32(headIdx)).map { String(cString: $0) } : nil
+
+                    // 检查是否为当前登录用户本人
+                    let isSelf = (usrName == accountID || usrName == normalizedAccountID || usrName.contains(baseAccountID))
+                    if isSelf || (detectedMyNickname == nil && usrName.hasPrefix("wxid_") && usrName.contains(baseAccountID)) {
+                        if !nickName.isEmpty { detectedMyNickname = nickName }
+                        if let alias, !alias.isEmpty { detectedMyAlias = alias }
+                    }
+
+                    contacts.append(WeChatContact(id: usrName, nickname: nickName, remark: remark, avatarURL: head))
+                }
+                sqlite3_finalize(stmt)
+            }
+
             if !contacts.isEmpty {
-                return contacts
+                break
             }
         }
 
-        // 2. 微信 3.x 结构：表名为 Contact，字段为 m_nsUsrName, m_nsNickName, m_nsRemark, m_nsHeadImgUrl
-        let queryV3 = "SELECT m_nsUsrName, m_nsNickName, m_nsRemark, m_nsHeadImgUrl FROM Contact WHERE m_nsUsrName IS NOT NULL AND m_nsUsrName != '';"
-        var stmtV3: OpaquePointer?
-        if sqlite3_prepare_v2(db, queryV3, -1, &stmtV3, nil) == SQLITE_OK {
-            defer { sqlite3_finalize(stmtV3) }
-            while sqlite3_step(stmtV3) == SQLITE_ROW {
-                let usrName = sqlite3_column_text(stmtV3, 0).map { String(cString: $0) } ?? ""
-                let nickName = sqlite3_column_text(stmtV3, 1).map { String(cString: $0) } ?? ""
-                let remark = sqlite3_column_text(stmtV3, 2).map { String(cString: $0) }
-                let headImg = sqlite3_column_text(stmtV3, 3).map { String(cString: $0) }
-                guard !usrName.isEmpty else { continue }
-                contacts.append(WeChatContact(id: usrName, nickname: nickName, remark: remark, avatarURL: headImg))
-            }
-        }
-
-        return contacts
+        return (contacts, (detectedMyNickname, detectedMyAlias))
     }
 
     /// 根据 msg/attach 下的 32 位 MD5 目录名匹配真实联系人

@@ -152,7 +152,22 @@ public final class AppState {
     public func startScan() {
         guard let account = selectedAccount else { return }
         WeChatDatDecoder.shared.configure(with: account)
-        WeChatContactManager.shared.loadContacts(for: account)
+        WeChatContactManager.shared.switchAccount(to: account)
+        let loadRes = WeChatContactManager.shared.loadContacts(for: account)
+        if let nick = loadRes.myNickname, !nick.isEmpty {
+            self.selectedAccount?.customNickname = nick
+        }
+        if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
+            self.selectedAccount?.customWeChatID = wechatId
+        }
+        if let idx = accounts.firstIndex(where: { $0.id == account.id }) {
+            if let nick = loadRes.myNickname, !nick.isEmpty {
+                self.accounts[idx].customNickname = nick
+            }
+            if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
+                self.accounts[idx].customWeChatID = wechatId
+            }
+        }
 
         self.allItems = []
         self.itemMap = [:]
@@ -205,10 +220,25 @@ public final class AppState {
         }
     }
 
-    /// 重新加载联系人数据库并刷新所有会话的联系人绑定
+    /// 重新加载联系人数据库并刷新所有会话的联系人绑定与当前账号明文信息
     public func reloadContacts() {
         guard let account = selectedAccount else { return }
-        WeChatContactManager.shared.loadContacts(for: account)
+        let loadRes = WeChatContactManager.shared.loadContacts(for: account)
+        if let nick = loadRes.myNickname, !nick.isEmpty {
+            self.selectedAccount?.customNickname = nick
+        }
+        if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
+            self.selectedAccount?.customWeChatID = wechatId
+        }
+        if let idx = accounts.firstIndex(where: { $0.id == account.id }) {
+            if let nick = loadRes.myNickname, !nick.isEmpty {
+                self.accounts[idx].customNickname = nick
+            }
+            if let wechatId = loadRes.myWeChatID, !wechatId.isEmpty {
+                self.accounts[idx].customWeChatID = wechatId
+            }
+        }
+
         for i in 0..<sessions.count {
             let hash = sessions[i].id
             sessions[i].contact = WeChatContactManager.shared.contact(forChatMD5: hash)

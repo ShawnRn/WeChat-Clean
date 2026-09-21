@@ -1,7 +1,8 @@
 import SwiftUI
 import AppKit
+import LocalAuthentication
 
-/// 数据库密钥配置弹窗（支持一键导入 all_keys.json 或手动粘贴 64 位 Hex 密钥）
+/// 数据库密钥配置弹窗（支持 Touch ID / Apple Watch 生物识别预鉴权、多账号分别提取及 64 位 Hex 密钥）
 public struct DatabaseKeySheet: View {
     @Bindable var state: AppState
     @Environment(\.dismiss) private var dismiss
@@ -15,18 +16,35 @@ public struct DatabaseKeySheet: View {
         self.state = state
     }
 
+    private var currentAccountID: String {
+        state.selectedAccount?.id ?? ""
+    }
+
     public var body: some View {
         VStack(spacing: 20) {
-            // 1. 顶部 Header
+            // 1. 顶部 Header (展示当前所选账号)
             HStack(spacing: 12) {
                 Image(systemName: "key.fill")
                     .font(.system(size: 24))
                     .foregroundStyle(Color.accentColor)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("微信数据库密钥设置")
-                        .font(.headline)
-                    Text("用于解密 contact.db 以自动显示好友昵称、群名称及头像")
+                    HStack(spacing: 8) {
+                        Text("微信数据库密钥设置")
+                            .font(.headline)
+
+                        if let acc = state.selectedAccount {
+                            Text(acc.displayTitle)
+                                .font(.system(size: 11, weight: .bold))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                                .foregroundStyle(Color.accentColor)
+                                .help("账号目录: \(acc.id)")
+                        }
+                    }
+
+                    Text("针对当前微信账号解密 contact.db，自动识别好友真实昵称、群名称与微信号")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -36,31 +54,46 @@ public struct DatabaseKeySheet: View {
 
             Divider()
 
-            // 2. 当前状态卡片
+            // 2. 当前状态卡片 (按当前账号隔离展示)
             HStack(spacing: 12) {
-                let hasKey = WeChatContactManager.shared.hasKey
+                let hasKey = WeChatContactManager.shared.hasKey(for: currentAccountID)
                 let count = WeChatContactManager.shared.loadedContactCount
+                let myName = state.selectedAccount?.customNickname
+                let myAlias = state.selectedAccount?.customWeChatID
 
                 Image(systemName: hasKey ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .font(.system(size: 20))
                     .foregroundStyle(hasKey ? .green : .orange)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(hasKey ? "已配置数据库密钥" : "未配置数据库密钥")
+                    Text(hasKey ? "已配置本账号密钥" : "未配置本账号密钥")
                         .font(.system(size: 13, weight: .semibold))
-                    Text(hasKey ? "已成功关联 \(count) 个微信联系人及群聊" : "未解密状态下将显示会话哈希（您仍可手动设置备注）")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+
+                    if hasKey {
+                        if let myName, !myName.isEmpty {
+                            Text("已识别本人：\(myName)\(myAlias != nil ? " (\(myAlias!))" : "") · 关联 \(count) 位联系人与群")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("已成功关联 \(count) 个微信联系人及群聊")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("未解密状态下将显示会话哈希（可在会话列表中手动设置备注）")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Spacer()
 
                 if hasKey {
                     Button(role: .destructive) {
-                        WeChatContactManager.shared.clearKeys()
+                        WeChatContactManager.shared.clearKeys(for: currentAccountID)
                         state.reloadContacts()
                         hexKeyInput = ""
-                        statusMessage = "已清除密钥配置"
+                        statusMessage = "已清除本账号的密钥配置"
                         isError = false
                     } label: {
                         Text("清除")
@@ -75,21 +108,26 @@ public struct DatabaseKeySheet: View {
 
             // 3. 导入与提取区域
             VStack(alignment: .leading, spacing: 14) {
-                // 方式 A: 一键自动提取 (推荐，macOS 标准系统授权)
+                // 方式 A: 一键自动提取 (支持 Touch ID / Apple Watch 与系统提权)
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 6) {
                                 Text("方式一：一键自动提取 (推荐)")
                                     .font(.system(size: 12, weight: .bold))
-                                Text("免手动")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(Color.accentColor))
+
+                                HStack(spacing: 3) {
+                                    Image(systemName: "touchid")
+                                    Image(systemName: "applewatch")
+                                    Text("触控ID / 手表")
+                                }
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color.accentColor))
                             }
-                            Text("调用系统标准提权向您请求管理员权限，自动提取并关联联系人与会话")
+                            Text("请求触控 ID、Apple Watch 或管理员权限，自动提取当前账号密钥")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
@@ -97,7 +135,7 @@ public struct DatabaseKeySheet: View {
                         Spacer()
 
                         Button {
-                            autoExtractKeys()
+                            startExtractionFlow()
                         } label: {
                             HStack(spacing: 6) {
                                 if isExtracting {
@@ -203,7 +241,8 @@ public struct DatabaseKeySheet: View {
         .padding(22)
         .frame(width: 480)
         .onAppear {
-            if let currentKey = WeChatContactManager.shared.getKey(forDatabase: "contact.db") ?? WeChatContactManager.shared.getKey(forDatabase: "contact") {
+            if let currentKey = WeChatContactManager.shared.getKey(forDatabase: "contact.db", accountID: currentAccountID)
+                ?? WeChatContactManager.shared.getKey(forDatabase: "contact", accountID: currentAccountID) {
                 self.hexKeyInput = currentKey
             }
         }
@@ -223,13 +262,16 @@ public struct DatabaseKeySheet: View {
         }
 
         if panel.runModal() == .OK, let url = panel.url {
-            let success = WeChatContactManager.shared.importKeys(from: url)
+            let success = WeChatContactManager.shared.importKeys(from: url, forAccount: currentAccountID)
             if success {
                 state.reloadContacts()
                 let count = WeChatContactManager.shared.loadedContactCount
-                statusMessage = "导入成功！已关联 \(count) 个联系人"
+                let myName = state.selectedAccount?.customNickname ?? ""
+                let myAlias = state.selectedAccount?.customWeChatID ?? ""
+                let identityStr = !myName.isEmpty ? "「\(myName)」(\(myAlias))" : ""
+                statusMessage = "导入成功！已关联 \(identityStr) \(count) 个联系人"
                 isError = false
-                if let key = WeChatContactManager.shared.getKey(forDatabase: "contact.db") {
+                if let key = WeChatContactManager.shared.getKey(forDatabase: "contact.db", accountID: currentAccountID) {
                     self.hexKeyInput = key
                 }
             } else {
@@ -248,20 +290,55 @@ public struct DatabaseKeySheet: View {
             return
         }
 
-        WeChatContactManager.shared.setKey(clean, forDatabase: "contact.db")
-        WeChatContactManager.shared.setKey(clean, forDatabase: "contact")
+        WeChatContactManager.shared.setKey(clean, forDatabase: "contact.db", accountID: currentAccountID)
+        WeChatContactManager.shared.setKey(clean, forDatabase: "contact", accountID: currentAccountID)
         state.reloadContacts()
 
         let count = WeChatContactManager.shared.loadedContactCount
-        statusMessage = "密钥已保存！成功加载 \(count) 个联系人"
+        let myName = state.selectedAccount?.customNickname ?? ""
+        let myAlias = state.selectedAccount?.customWeChatID ?? ""
+        let identityStr = !myName.isEmpty ? "账号「\(myName)」(\(myAlias))，" : ""
+        statusMessage = "密钥已保存！成功识别 \(identityStr)加载 \(count) 个联系人"
         isError = false
+    }
+
+    // MARK: - 生物识别（Touch ID / Apple Watch）鉴权流
+    private func startExtractionFlow() {
+        guard !isExtracting else { return }
+        let context = LAContext()
+        context.localizedCancelTitle = "取消"
+        var authError: NSError?
+
+        let accountName = state.selectedAccount?.displayTitle ?? "微信账号"
+        let reason = "使用触控 ID 或 Apple Watch 验证以提取「\(accountName)」的数据库密钥"
+
+        if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) {
+            isExtracting = true
+            statusMessage = "请轻触触控 ID、双击 Apple Watch 侧边按钮或输入密码..."
+            isError = false
+
+            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, evalError in
+                Task { @MainActor in
+                    if success {
+                        self.autoExtractKeys()
+                    } else {
+                        self.isExtracting = false
+                        let errDesc = evalError?.localizedDescription ?? "用户已取消认证"
+                        self.statusMessage = "认证未完成: \(errDesc)"
+                        self.isError = true
+                    }
+                }
+            }
+        } else {
+            // 设备不支持生物识别，直接进行底层提权
+            autoExtractKeys()
+        }
     }
 
     // MARK: - 调用系统管理员提权自动提取微信密钥
     private func autoExtractKeys() {
-        guard !isExtracting else { return }
         isExtracting = true
-        statusMessage = "正在准备数据库信息并请求系统管理员权限..."
+        statusMessage = "正在准备「\(state.selectedAccount?.displayTitle ?? "当前账号")」数据库并扫描内存密钥..."
         isError = false
 
         let home = WeChatDetector.realHomeDirectory.path
@@ -275,7 +352,7 @@ public struct DatabaseKeySheet: View {
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
 
-            // 1. 在当前用户权限下读取 db_storage 中所有 .db 的前 4096 字节与 Salt
+            // 1. 在当前用户权限下读取当前账号 db_storage 中所有 .db 的前 4096 字节与 Salt
             var dbsInfo: [[String: String]] = []
             if let enumerator = fm.enumerator(at: dbStorageURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
                 while let fileURL = enumerator.nextObject() as? URL {
@@ -349,7 +426,7 @@ public struct DatabaseKeySheet: View {
             try? fm.copyItem(atPath: validScript, toPath: tempScriptPath)
             try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
 
-            // 5. 构造标准的提权命令并通过独立的 /usr/bin/osascript 进程执行（确保弹出系统管理员凭证框，避免 NSAppleScript 的 AppleEvents 拦截）
+            // 5. 构造提权命令并通过独立的 /usr/bin/osascript 进程执行
             let shellCmd = "\"\(pythonBin)\" \"\(tempScriptPath)\" \"\(tempDbInfoPath)\" \"\(tempOutputPath)\""
             let escapedCmd = shellCmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
             let appleScriptText = "do shell script \"\(escapedCmd)\" with administrator privileges"
@@ -371,7 +448,7 @@ public struct DatabaseKeySheet: View {
                     let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
                     let errStr = (String(data: errData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     if errStr.contains("User canceled") || errStr.contains("-128") {
-                        runError = "用户取消了管理员授权"
+                        runError = "用户取消了授权"
                     } else if !errStr.isEmpty {
                         runError = errStr
                     } else {
@@ -424,12 +501,10 @@ public struct DatabaseKeySheet: View {
                     self.isError = true
                     self.statusMessage = "提取失败: \(err)"
                 } else if !extractedKeys.isEmpty {
-                    // 保存到联系人管理器
-                    for (dbName, key) in extractedKeys {
-                        WeChatContactManager.shared.setKey(key, forDatabase: dbName)
-                    }
+                    // 绑定当前账号保存专属密钥
+                    WeChatContactManager.shared.setKeys(extractedKeys, forAccount: accountID)
 
-                    // 写入 ~/.config/wx-cli/all_keys.json 供持久化
+                    // 写入持久化备份
                     let targetURL = URL(fileURLWithPath: targetJson)
                     try? fm.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                     if let jsonData = try? JSONSerialization.data(withJSONObject: extractedKeys, options: [.prettyPrinted]) {
@@ -438,14 +513,24 @@ public struct DatabaseKeySheet: View {
 
                     self.state.reloadContacts()
                     let count = WeChatContactManager.shared.loadedContactCount
+                    let myName = self.state.selectedAccount?.customNickname ?? ""
+                    let myAlias = self.state.selectedAccount?.customWeChatID ?? ""
+
                     self.isError = false
-                    self.statusMessage = "提取并关联成功！已成功加载 \(count) 个联系人与好友昵称"
-                    if let key = WeChatContactManager.shared.getKey(forDatabase: "contact.db") {
+                    if !myName.isEmpty {
+                        self.statusMessage = "提取成功！已成功识别账号「\(myName)」(微信号: \(myAlias))，关联 \(count) 位联系人"
+                    } else if count > 0 {
+                        self.statusMessage = "提取成功！已成功关联 \(count) 位微信好友与群聊"
+                    } else {
+                        self.statusMessage = "密钥提取成功并已保存！但当前数据库暂无好友记录，请确认微信登录状态"
+                    }
+
+                    if let key = WeChatContactManager.shared.getKey(forDatabase: "contact.db", accountID: accountID) {
                         self.hexKeyInput = key
                     }
                 } else {
                     self.isError = true
-                    self.statusMessage = "提取脚本执行完成，但未能在内存中匹配到密钥，请确保微信保持登录"
+                    self.statusMessage = "未在内存中匹配到「\(self.state.selectedAccount?.displayTitle ?? "当前账号")」的有效密钥，请确保微信正在登录该账号"
                 }
             }
         }
