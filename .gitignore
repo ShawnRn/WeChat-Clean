@@ -1,0 +1,28 @@
+# Xcode and Swift Package Manager
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+*.xcscmblueprint
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Icon?
+.Spotlight-V100
+.Trashes
+
+# Application Bundles (Built by scripts/build_app.sh)
+微信存储管理.app/
+*.app/
+*.dSYM/
+
+# Sensitive & Temporary Files
+all_keys.json
+keys.txt
+*.tmp
+*.log
+scratch/
