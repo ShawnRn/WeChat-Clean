@@ -341,16 +341,48 @@ public struct DatabaseKeySheet: View {
             let pythonCandidates = ["/opt/homebrew/bin/python3", "/usr/bin/python3", "/usr/local/bin/python3"]
             let pythonBin = pythonCandidates.first { fm.fileExists(atPath: $0) } ?? "python3"
 
-            // 4. 构造带管理员权限的标准 AppleScript（使用 /tmp 路径，彻底解决 root 跨沙盒限制）
-            let cmd = "\"\(pythonBin)\" \"\(validScript)\" \"\(tempDbInfoPath)\" \"\(tempOutputPath)\""
-            let escapedCmd = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-            let appleScriptSource = "do shell script \"\(escapedCmd)\" with administrator privileges"
+            // 4. 将提取脚本复制到 /tmp 以规避 root 跨越 iCloud/用户沙盒权限问题
+            let tempScriptPath = "/tmp/wechat_extract_keys.py"
+            if fm.fileExists(atPath: tempScriptPath) {
+                try? fm.removeItem(atPath: tempScriptPath)
+            }
+            try? fm.copyItem(atPath: validScript, toPath: tempScriptPath)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempScriptPath)
 
-            var errorInfo: NSDictionary?
-            let appleScript = NSAppleScript(source: appleScriptSource)
-            let _ = appleScript?.executeAndReturnError(&errorInfo)
+            // 5. 构造标准的提权命令并通过独立的 /usr/bin/osascript 进程执行（确保弹出系统管理员凭证框，避免 NSAppleScript 的 AppleEvents 拦截）
+            let shellCmd = "\"\(pythonBin)\" \"\(tempScriptPath)\" \"\(tempDbInfoPath)\" \"\(tempOutputPath)\""
+            let escapedCmd = shellCmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            let appleScriptText = "do shell script \"\(escapedCmd)\" with administrator privileges"
 
-            // 5. 解析提取结果
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", appleScriptText]
+
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            proc.standardOutput = stdoutPipe
+            proc.standardError = stderrPipe
+
+            var runError: String?
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                if proc.terminationStatus != 0 {
+                    let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errStr = (String(data: errData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if errStr.contains("User canceled") || errStr.contains("-128") {
+                        runError = "用户取消了管理员授权"
+                    } else if !errStr.isEmpty {
+                        runError = errStr
+                    } else {
+                        runError = "提权执行未完成 (代码: \(proc.terminationStatus))"
+                    }
+                }
+            } catch {
+                runError = error.localizedDescription
+            }
+
+            // 6. 解析提取结果
             let tempOutputURL = URL(fileURLWithPath: tempOutputPath)
             var extractedKeys: [String: String] = [:]
             var candidates: [String] = []
@@ -384,13 +416,13 @@ public struct DatabaseKeySheet: View {
             // 清理临时文件
             try? fm.removeItem(atPath: tempDbInfoPath)
             try? fm.removeItem(atPath: tempOutputPath)
+            try? fm.removeItem(atPath: tempScriptPath)
 
             await MainActor.run {
                 self.isExtracting = false
-                if let error = errorInfo, extractedKeys.isEmpty {
-                    let errMsg = (error[NSAppleScript.errorMessage] as? String) ?? "用户取消授权或执行失败"
+                if let err = runError, extractedKeys.isEmpty {
                     self.isError = true
-                    self.statusMessage = "提取失败: \(errMsg)"
+                    self.statusMessage = "提取失败: \(err)"
                 } else if !extractedKeys.isEmpty {
                     // 保存到联系人管理器
                     for (dbName, key) in extractedKeys {

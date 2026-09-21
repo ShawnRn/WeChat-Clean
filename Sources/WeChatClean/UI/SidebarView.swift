@@ -252,47 +252,52 @@ public struct SidebarView: View {
 
                     Spacer()
 
-                    // 编辑资料按钮
-                    Button {
-                        showAccountEditSheet = true
-                    } label: {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .padding(5)
-                            .background(Circle().fill(Color.primary.opacity(0.05)))
-                    }
-                    .buttonStyle(.plain)
-                    .help("编辑微信昵称与微信号")
+                    HStack(spacing: 6) {
+                        // 编辑资料按钮
+                        Button {
+                            showAccountEditSheet = true
+                        } label: {
+                            Image(systemName: "pencil")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 22, height: 22)
+                                .background(Circle().fill(Color.primary.opacity(0.06)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("编辑微信昵称与微信号")
 
-                    // 账号切换菜单
-                    if accounts.count > 1 {
-                        Menu {
-                            ForEach(accounts) { account in
-                                Button {
-                                    state.selectedAccount = account
-                                    state.startScan()
-                                } label: {
-                                    HStack {
-                                        Text(account.displayTitle)
-                                        if account.id == state.selectedAccount?.id {
-                                            Spacer()
-                                            Image(systemName: "checkmark")
+                        // 账号切换菜单
+                        if accounts.count > 1 {
+                            Menu {
+                                ForEach(accounts) { account in
+                                    Button {
+                                        state.selectedAccount = account
+                                        state.startScan()
+                                    } label: {
+                                        HStack {
+                                            Text(account.displayTitle)
+                                            if account.id == state.selectedAccount?.id {
+                                                Spacer()
+                                                Image(systemName: "checkmark")
+                                            }
                                         }
                                     }
                                 }
+                                Divider()
+                                Button("指定其他微信目录...") {
+                                    state.promptForWeChatDirectory()
+                                }
+                            } label: {
+                                Image(systemName: "arrow.left.arrow.right")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 22, height: 22)
+                                    .background(Circle().fill(Color.primary.opacity(0.06)))
                             }
-                            Divider()
-                            Button("指定其他微信目录...") {
-                                state.promptForWeChatDirectory()
-                            }
-                        } label: {
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.tertiary)
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .help("切换微信账号")
                         }
-                        .menuStyle(.borderlessButton)
-                        .frame(width: 14)
                     }
                 }
                 .padding(.horizontal, 10)
