@@ -8,7 +8,6 @@ public struct SessionListView: View {
     @State private var editingSessionID: String? = nil
     @State private var editingRemarkText: String = ""
     @State private var sortOption: SessionSortOption = .sizeDesc
-    @State private var showKeySheet: Bool = false
     @State private var keyMonitor: Any?
 
     public enum SessionSortOption: String, CaseIterable, Identifiable {
@@ -67,6 +66,35 @@ public struct SessionListView: View {
                 Divider()
                     .padding(.horizontal, 22)
 
+                // 1.1 密钥引导横幅 (未配置密钥时显著提示)
+                if !WeChatContactManager.shared.hasKey {
+                    HStack(spacing: 10) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.orange)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("未配置数据库密钥，会话仅显示原始哈希")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("点击一键自动提取密钥，即可自动匹配微信联系人昵称、备注与群聊名称。")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Button("一键提取密钥") {
+                            state.showDatabaseKeySheet = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+                    .padding(.horizontal, 22)
+                    .padding(.top, 10)
+                }
+
                 // 2. 列表内容
                 if state.scanProgress.isScanning && state.sessions.isEmpty {
                     loadingView
@@ -85,9 +113,6 @@ public struct SessionListView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $showKeySheet) {
-            DatabaseKeySheet(state: state)
-        }
         .onAppear {
             setupKeyMonitor()
         }
@@ -199,7 +224,7 @@ public struct SessionListView: View {
 
             // 数据库密钥设置按钮
             Button {
-                showKeySheet = true
+                state.showDatabaseKeySheet = true
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: WeChatContactManager.shared.hasKey ? "key.fill" : "key")

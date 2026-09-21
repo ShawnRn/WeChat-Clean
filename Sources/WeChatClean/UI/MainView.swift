@@ -16,6 +16,9 @@ public struct MainView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .quickLookPreview($state.previewURL)
+        .sheet(isPresented: $state.showDatabaseKeySheet) {
+            DatabaseKeySheet(state: state)
+        }
         .alert("提示", isPresented: $state.showAlert) {
             Button("好", role: .cancel) {}
         } message: {

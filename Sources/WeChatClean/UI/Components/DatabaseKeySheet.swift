@@ -261,19 +261,58 @@ public struct DatabaseKeySheet: View {
     private func autoExtractKeys() {
         guard !isExtracting else { return }
         isExtracting = true
-        statusMessage = "正在请求系统管理员权限以扫描微信内存..."
+        statusMessage = "正在准备数据库信息并请求系统管理员权限..."
         isError = false
 
         let home = WeChatDetector.realHomeDirectory.path
         let accountID = state.selectedAccount?.id ?? ""
-        let dbDir = state.selectedAccount?.url.appendingPathComponent("db_storage").path
-            ?? "\(home)/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/\(accountID)/db_storage"
+        let dbStorageURL: URL = state.selectedAccount?.url.appendingPathComponent("db_storage")
+            ?? URL(fileURLWithPath: "\(home)/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/\(accountID)/db_storage")
         let targetJson = "\(home)/.config/wx-cli/all_keys.json"
+        let tempDbInfoPath = "/tmp/wechat_db_info.json"
+        let tempOutputPath = "/tmp/wechat_extracted_keys.json"
 
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
 
-            // 寻找 extract_keys.py 脚本路径
+            // 1. 在当前用户权限下读取 db_storage 中所有 .db 的前 4096 字节与 Salt
+            var dbsInfo: [[String: String]] = []
+            if let enumerator = fm.enumerator(at: dbStorageURL, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                while let fileURL = enumerator.nextObject() as? URL {
+                    if fileURL.pathExtension == "db" && !fileURL.lastPathComponent.contains("-wal") && !fileURL.lastPathComponent.contains("-shm") {
+                        if let handle = try? FileHandle(forReadingFrom: fileURL) {
+                            if let page = try? handle.read(upToCount: 4096), page.count == 4096,
+                               page.prefix(16) != Data("SQLite format 3\0".utf8) {
+                                let relPath = fileURL.path.replacingOccurrences(of: dbStorageURL.path + "/", with: "")
+                                let saltHex = page.prefix(16).map { String(format: "%02x", $0) }.joined()
+                                let pageHex = page.map { String(format: "%02x", $0) }.joined()
+                                dbsInfo.append([
+                                    "name": fileURL.lastPathComponent,
+                                    "rel": relPath,
+                                    "salt_hex": saltHex,
+                                    "page_hex": pageHex
+                                ])
+                            }
+                            try? handle.close()
+                        }
+                    }
+                }
+            }
+
+            guard !dbsInfo.isEmpty else {
+                await MainActor.run {
+                    self.isExtracting = false
+                    self.isError = true
+                    self.statusMessage = "未在 \(dbStorageURL.path) 下发现有效的加密数据库文件，请确认微信已登录"
+                }
+                return
+            }
+
+            // 写入临时描述文件
+            let infoData = (try? JSONSerialization.data(withJSONObject: ["dbs": dbsInfo], options: [.prettyPrinted])) ?? Data()
+            try? infoData.write(to: URL(fileURLWithPath: tempDbInfoPath))
+
+            // 2. 寻找 extract_keys.py 脚本路径
             var scriptPath: String?
             let possiblePaths = [
                 Bundle.main.path(forResource: "extract_keys", ofType: "py"),
@@ -298,12 +337,12 @@ public struct DatabaseKeySheet: View {
                 return
             }
 
-            // 寻找 python3 解释器
+            // 3. 寻找 python3 解释器
             let pythonCandidates = ["/opt/homebrew/bin/python3", "/usr/bin/python3", "/usr/local/bin/python3"]
             let pythonBin = pythonCandidates.first { fm.fileExists(atPath: $0) } ?? "python3"
 
-            // 构造带管理员权限的标准 AppleScript
-            let cmd = "\"\(pythonBin)\" \"\(validScript)\" \"\(dbDir)\" \"\(targetJson)\""
+            // 4. 构造带管理员权限的标准 AppleScript（使用 /tmp 路径，彻底解决 root 跨沙盒限制）
+            let cmd = "\"\(pythonBin)\" \"\(validScript)\" \"\(tempDbInfoPath)\" \"\(tempOutputPath)\""
             let escapedCmd = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
             let appleScriptSource = "do shell script \"\(escapedCmd)\" with administrator privileges"
 
@@ -311,27 +350,70 @@ public struct DatabaseKeySheet: View {
             let appleScript = NSAppleScript(source: appleScriptSource)
             let _ = appleScript?.executeAndReturnError(&errorInfo)
 
+            // 5. 解析提取结果
+            let tempOutputURL = URL(fileURLWithPath: tempOutputPath)
+            var extractedKeys: [String: String] = [:]
+            var candidates: [String] = []
+
+            if let outData = try? Data(contentsOf: tempOutputURL),
+               let json = try? JSONSerialization.jsonObject(with: outData) as? [String: Any] {
+                for (k, v) in json {
+                    if k == "_candidates", let candList = v as? [String] {
+                        candidates = candList
+                    } else if let keyStr = v as? String, keyStr.count == 64 {
+                        extractedKeys[k] = keyStr
+                    }
+                }
+            }
+
+            // 若 contact.db 没直接匹配上，使用 candidates 对 contact.db 进行二次确权
+            let contactDBURL = dbStorageURL.appendingPathComponent("contact/contact.db")
+            if extractedKeys["contact.db"] == nil && fm.fileExists(atPath: contactDBURL.path) {
+                for cand in candidates {
+                    if cand.count == 64, let candData = Data(hexString: cand) {
+                        if SQLCipherDecryptor.validateKey(candData, forDatabase: contactDBURL) {
+                            extractedKeys["contact.db"] = cand
+                            extractedKeys["contact/contact.db"] = cand
+                            extractedKeys["contact"] = cand
+                            break
+                        }
+                    }
+                }
+            }
+
+            // 清理临时文件
+            try? fm.removeItem(atPath: tempDbInfoPath)
+            try? fm.removeItem(atPath: tempOutputPath)
+
             await MainActor.run {
                 self.isExtracting = false
-                if let error = errorInfo {
+                if let error = errorInfo, extractedKeys.isEmpty {
                     let errMsg = (error[NSAppleScript.errorMessage] as? String) ?? "用户取消授权或执行失败"
                     self.isError = true
                     self.statusMessage = "提取失败: \(errMsg)"
-                } else {
-                    let targetURL = URL(fileURLWithPath: targetJson)
-                    let success = WeChatContactManager.shared.importKeys(from: targetURL)
-                    if success {
-                        self.state.reloadContacts()
-                        let count = WeChatContactManager.shared.loadedContactCount
-                        self.isError = false
-                        self.statusMessage = "提取并关联成功！已成功加载 \(count) 个联系人与好友昵称"
-                        if let key = WeChatContactManager.shared.getKey(forDatabase: "contact.db") {
-                            self.hexKeyInput = key
-                        }
-                    } else {
-                        self.isError = true
-                        self.statusMessage = "提取脚本执行完成，但未能在目标路径识别出密钥"
+                } else if !extractedKeys.isEmpty {
+                    // 保存到联系人管理器
+                    for (dbName, key) in extractedKeys {
+                        WeChatContactManager.shared.setKey(key, forDatabase: dbName)
                     }
+
+                    // 写入 ~/.config/wx-cli/all_keys.json 供持久化
+                    let targetURL = URL(fileURLWithPath: targetJson)
+                    try? fm.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if let jsonData = try? JSONSerialization.data(withJSONObject: extractedKeys, options: [.prettyPrinted]) {
+                        try? jsonData.write(to: targetURL)
+                    }
+
+                    self.state.reloadContacts()
+                    let count = WeChatContactManager.shared.loadedContactCount
+                    self.isError = false
+                    self.statusMessage = "提取并关联成功！已成功加载 \(count) 个联系人与好友昵称"
+                    if let key = WeChatContactManager.shared.getKey(forDatabase: "contact.db") {
+                        self.hexKeyInput = key
+                    }
+                } else {
+                    self.isError = true
+                    self.statusMessage = "提取脚本执行完成，但未能在内存中匹配到密钥，请确保微信保持登录"
                 }
             }
         }

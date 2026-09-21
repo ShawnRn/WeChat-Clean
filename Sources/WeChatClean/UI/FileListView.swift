@@ -179,6 +179,27 @@ public struct FileListView: View {
 
             Spacer()
 
+            // 提取密钥快捷入口 (未配置密钥时显著提示)
+            if !WeChatContactManager.shared.hasKey {
+                Button {
+                    state.showDatabaseKeySheet = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                        Text("提取密钥显示联系人")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .help("一键提取微信数据库密钥以显示联系人真实昵称与群名")
+            }
+
             // 搜索框
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")

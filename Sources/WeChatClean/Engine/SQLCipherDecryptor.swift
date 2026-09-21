@@ -200,3 +200,20 @@ public enum SQLCipherDecryptor {
         }
     }
 }
+
+extension Data {
+    public init?(hexString: String) {
+        let cleanHex = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanHex.count % 2 == 0 else { return nil }
+        var data = Data(capacity: cleanHex.count / 2)
+        var index = cleanHex.startIndex
+        while index < cleanHex.endIndex {
+            let nextIndex = cleanHex.index(index, offsetBy: 2)
+            guard let b = UInt8(cleanHex[index..<nextIndex], radix: 16) else { return nil }
+            data.append(b)
+            index = nextIndex
+        }
+        self = data
+    }
+}
+

@@ -98,9 +98,10 @@ public final class AppState {
         didSet { scheduleFilterAndSort() }
     }
 
-    // 提示信息
+    // 提示信息与全局弹窗
     public var alertMessage: String?
     public var showAlert: Bool = false
+    public var showDatabaseKeySheet: Bool = false
 
     // 引擎与后台任务
     private let scanner = ScannerEngine()

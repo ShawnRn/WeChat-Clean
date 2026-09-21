@@ -96,6 +96,26 @@ def verify_hmac_page1(page, enc_key_bytes):
     return hmac.compare_digest(computed, stored)
 
 
+def collect_dbs_from_json(json_path):
+    dbs = []
+    try:
+        with open(json_path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        items = data.get("dbs", []) if isinstance(data, dict) else data
+        for item in items:
+            page = bytes.fromhex(item["page_hex"])
+            salt = bytes.fromhex(item["salt_hex"]) if "salt_hex" in item else page[:SALT_SZ]
+            dbs.append({
+                "rel": item.get("rel", item.get("name", "unknown.db")),
+                "name": item.get("name", "unknown.db"),
+                "page": page,
+                "salt": salt
+            })
+    except Exception as e:
+        print(f"[-] 读取数据库描述文件失败: {e}")
+    return dbs
+
+
 def collect_dbs(db_storage_dir):
     dbs = []
     if not os.path.exists(db_storage_dir):
@@ -191,10 +211,10 @@ def scan_memory_keys(task, db_list):
                                 break
                             # 前向 32 字节
                             if idx >= 32:
-                                salt_adjacent.add(buf[idx - 32:idx].hex())
+                                salt_adjacent.add(buf[idx - 32:idx].hex().lower())
                             # 后向 32 字节
                             if idx + len(s) + 32 <= len(buf):
-                                salt_adjacent.add(buf[idx + len(s):idx + len(s) + 32].hex())
+                                salt_adjacent.add(buf[idx + len(s):idx + len(s) + 32].hex().lower())
                             start_pos = idx + 1
 
                     mach_vm_deallocate(mach_task_self(), data_ptr.value, dc.value)
@@ -210,13 +230,24 @@ def scan_memory_keys(task, db_list):
     return list(candidates) + list(salt_adjacent)
 
 
+def get_real_user_home():
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        import pwd
+        try:
+            return pwd.getpwnam(sudo_user).pw_dir
+        except Exception:
+            pass
+    return os.path.expanduser("~")
+
+
 def main():
     print("=== 微信 4.x 本地数据库密钥提取器 ===")
     
     if len(sys.argv) < 2:
-        print("用法: sudo python3 extract_keys.py <db_storage_dir> [output_json]")
+        print("用法: sudo python3 extract_keys.py <db_storage_dir | db_info.json> [output_json]")
         # 尝试自动定位用户微信目录
-        home = os.path.expanduser("~")
+        home = get_real_user_home()
         xwechat_dir = os.path.join(home, "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
         if os.path.exists(xwechat_dir):
             for item in os.listdir(xwechat_dir):
@@ -228,22 +259,31 @@ def main():
                     return
         sys.exit(1)
 
-    db_storage_dir = sys.argv[1]
-    output_json = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser("~/.config/wx-cli/all_keys.json")
-    run_extraction(db_storage_dir, output_json)
+    input_target = sys.argv[1]
+    home = get_real_user_home()
+    default_output = os.path.join(home, ".config/wx-cli/all_keys.json")
+    output_json = sys.argv[2] if len(sys.argv) > 2 else default_output
+    run_extraction(input_target, output_json)
 
 
-def run_extraction(db_storage_dir, output_json):
+def run_extraction(input_target, output_json):
     pid = find_wechat_pid()
     if not pid:
         print("[-] 未检测到运行中的微信进程。请先打开微信并登录！")
         sys.exit(2)
 
     print(f"[+] 微信正在运行 (PID: {pid})")
-    dbs = collect_dbs(db_storage_dir)
-    print(f"[+] 在目标目录中发现 {len(dbs)} 个加密数据库")
+
+    # 判断 input_target 是 JSON 还是目录
+    if os.path.isfile(input_target) and input_target.endswith(".json"):
+        print(f"[+] 从描述文件加载数据库信息: {input_target}")
+        dbs = collect_dbs_from_json(input_target)
+    else:
+        dbs = collect_dbs(input_target)
+
+    print(f"[+] 目标包含 {len(dbs)} 个待匹配数据库")
     if not dbs:
-        print(f"[-] 目录下未发现加密的 .db 文件: {db_storage_dir}")
+        print(f"[-] 未发现任何待匹配的加密数据库信息: {input_target}")
         sys.exit(3)
 
     task = ctypes.c_uint()
@@ -260,6 +300,7 @@ def run_extraction(db_storage_dir, output_json):
     print(f"[+] 扫描完成（耗时 {time.time() - start_time:.2f}s），获得 {len(candidates)} 个候选密钥")
 
     matched_keys = {}
+    matched_set = set()
     for db in dbs:
         for cand in candidates:
             if len(cand) == 64:
@@ -268,6 +309,7 @@ def run_extraction(db_storage_dir, output_json):
                     if verify_hmac_page1(db["page"], cand_bytes):
                         matched_keys[db["rel"]] = cand
                         matched_keys[db["name"]] = cand
+                        matched_set.add(cand)
                         # 兼容 contact/contact.db 或 contact.db 两种索引
                         if "contact" in db["rel"]:
                             matched_keys["contact.db"] = cand
@@ -280,12 +322,31 @@ def run_extraction(db_storage_dir, output_json):
                 except Exception:
                     pass
 
-    print(f"[+] 共成功匹配 {len(matched_keys) // 2} 个核心数据库密钥！")
+    # 将所有候选也保存一份以备后用
+    output_data = {
+        "matched": matched_keys,
+        "candidates": list(set(candidates))
+    }
+    # 扁平化合并以便直接作为 key-map 使用
+    final_output = {}
+    final_output.update(matched_keys)
+    final_output["_candidates"] = list(set(candidates))
+
+    print(f"[+] 共成功匹配 {len(matched_set)} 个核心数据库密钥！")
 
     # 写入 JSON
     os.makedirs(os.path.dirname(output_json), exist_ok=True)
     with open(output_json, "w", encoding="utf-8") as f:
-        json.dump(matched_keys, f, indent=2)
+        json.dump(final_output, f, indent=2)
+
+    # 确保文件权限允许当前非 root 用户读写
+    try:
+        sudo_uid = os.environ.get("SUDO_UID")
+        sudo_gid = os.environ.get("SUDO_GID")
+        if sudo_uid and sudo_gid:
+            os.chown(output_json, int(sudo_uid), int(sudo_gid))
+    except Exception:
+        pass
 
     print(f"[✓] 密钥已成功保存到: {output_json}")
 

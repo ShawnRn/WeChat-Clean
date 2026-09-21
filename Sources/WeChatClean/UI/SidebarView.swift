@@ -20,7 +20,12 @@ public struct SidebarView: View {
             // 2. 账号选择或权限提示
             accountSection
                 .padding(.horizontal, 16)
-                .padding(.bottom, 16)
+                .padding(.bottom, 10)
+
+            // 2.1 密钥提取显性卡片 (未配置时显眼引导，已配置时轻量提示)
+            keyStatusSection
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
 
             Divider()
                 .padding(.horizontal, 16)
@@ -125,6 +130,80 @@ public struct SidebarView: View {
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $showAccountEditSheet) {
             AccountEditSheet(state: state, isPresented: $showAccountEditSheet)
+        }
+    }
+
+    // MARK: - 密钥状态与一键提取卡片
+    @ViewBuilder
+    private var keyStatusSection: some View {
+        let hasKey = WeChatContactManager.shared.hasKey
+        let contactCount = WeChatContactManager.shared.loadedContactCount
+
+        if !hasKey {
+            Button {
+                state.showDatabaseKeySheet = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.orange)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("一键提取联系人与会话密钥")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text("自动识别好友昵称与会话")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.orange.opacity(0.12))
+                        .stroke(Color.orange.opacity(0.28), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("一键提权提取数据库密钥以显示联系人昵称与群名")
+        } else {
+            Button {
+                state.showDatabaseKeySheet = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.green)
+
+                    Text("已关联 \(contactCount) 位联系人")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    Image(systemName: "key.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.03))
+                )
+            }
+            .buttonStyle(.plain)
+            .help("数据库密钥已生效，点击可查看或重新配置")
         }
     }
 
